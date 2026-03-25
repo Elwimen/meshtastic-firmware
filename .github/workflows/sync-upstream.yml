@@ -1,0 +1,83 @@
+name: Sync with upstream
+
+on:
+  schedule:
+    - cron: "30 3 * * *" # daily at 03:30 UTC (after protobufs sync at 03:00)
+  workflow_dispatch: # allow manual trigger
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/ds18b20-sensor
+          fetch-depth: 0
+          submodules: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/meshtastic/firmware.git
+          git fetch upstream
+
+      - name: Sync develop with upstream
+        run: |
+          git checkout develop
+          git merge --ff-only upstream/develop
+          git push origin develop
+          git checkout feature/ds18b20-sensor
+
+      - name: Rebase feature branch onto develop
+        id: rebase
+        continue-on-error: true
+        run: git rebase develop
+
+      - name: Update protobufs submodule to fork master
+        if: steps.rebase.outcome == 'success'
+        run: |
+          PROTO_HASH=$(git ls-remote https://github.com/Elwimen/meshtastic-protobufs.git master | cut -f1)
+          CURRENT_HASH=$(git -C protobufs rev-parse HEAD)
+          if [ "$PROTO_HASH" != "$CURRENT_HASH" ]; then
+            echo "Updating protobufs: $CURRENT_HASH -> $PROTO_HASH"
+            git -C protobufs fetch https://github.com/Elwimen/meshtastic-protobufs.git master
+            git -C protobufs checkout FETCH_HEAD
+            git add protobufs
+            git commit --amend --no-edit
+          else
+            echo "Protobufs already up to date ($CURRENT_HASH)"
+          fi
+
+      - name: Push
+        if: steps.rebase.outcome == 'success'
+        run: git push origin feature/ds18b20-sensor --force-with-lease
+
+      - name: Open issue on conflict
+        if: steps.rebase.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['sync-conflict']
+            });
+            if (issues.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: 'Upstream sync conflict — manual rebase needed',
+                body: 'Automatic rebase of `feature/ds18b20-sensor` onto `develop` failed.\n\nRun locally:\n```bash\ngit fetch upstream\ngit rebase upstream/develop\n# resolve conflicts\ngit push origin feature/ds18b20-sensor --force-with-lease\n```',
+                labels: ['sync-conflict']
+              });
+            }
