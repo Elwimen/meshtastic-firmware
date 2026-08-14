@@ -973,6 +973,10 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         if (!MQTT::isValidConfig(c.payload_variant.mqtt)) {
             return false;
         }
+        // Left rebooting deliberately: broker address, credentials, TLS and the proxy/JSON options
+        // are read when the MQTT client establishes its connection, so applying them live would need
+        // a disconnect/reconnect path that does not exist yet. Splitting this section is only
+        // worthwhile alongside that work.
         moduleConfig.has_mqtt = true;
         moduleConfig.mqtt = c.payload_variant.mqtt;
 #endif
@@ -986,6 +990,17 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
             return false;
         }
 #endif
+        // enabled gates construction in setupModules(), and the port selection, pins, baud, mode and
+        // timeout are all consumed while SerialModule brings its UART up. echo is checked each time a
+        // packet is sent out, so it is the only field that takes effect live.
+        if (moduleConfig.serial.enabled == c.payload_variant.serial.enabled &&
+            moduleConfig.serial.rxd == c.payload_variant.serial.rxd && moduleConfig.serial.txd == c.payload_variant.serial.txd &&
+            moduleConfig.serial.baud == c.payload_variant.serial.baud &&
+            moduleConfig.serial.mode == c.payload_variant.serial.mode &&
+            moduleConfig.serial.timeout == c.payload_variant.serial.timeout &&
+            moduleConfig.serial.override_console_serial_port == c.payload_variant.serial.override_console_serial_port) {
+            shouldReboot = false;
+        }
         moduleConfig.has_serial = true;
         moduleConfig.serial = c.payload_variant.serial;
         break;
@@ -1008,11 +1023,23 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_store_forward_tag:
         LOG_INFO("Set module config: Store & Forward");
+        // No field here can be applied live: StoreForwardModule's constructor copies records,
+        // history_return_max, history_return_window and heartbeat into its own members (and sizes
+        // its heap allocation from records), so the module never re-reads them. enabled and
+        // is_server additionally gate its construction in setupModules().
         moduleConfig.has_store_forward = true;
         moduleConfig.store_forward = c.payload_variant.store_forward;
         break;
     case meshtastic_ModuleConfig_range_test_tag:
         LOG_INFO("Set module config: Range Test");
+        // enabled gates construction in setupModules(), sender is baked into the thread interval at
+        // startup, and clear_on_reboot is only meaningful across a restart. save is read when a
+        // result is actually written, so it is the one field that applies live.
+        if (moduleConfig.range_test.enabled == c.payload_variant.range_test.enabled &&
+            moduleConfig.range_test.sender == c.payload_variant.range_test.sender &&
+            moduleConfig.range_test.clear_on_reboot == c.payload_variant.range_test.clear_on_reboot) {
+            shouldReboot = false;
+        }
         moduleConfig.has_range_test = true;
         moduleConfig.range_test = c.payload_variant.range_test;
         break;
@@ -1040,16 +1067,42 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
     }
     case meshtastic_ModuleConfig_canned_message_tag:
         LOG_INFO("Set module config: Canned Message");
+        // The rotary/up-down input pins and their event codes are consumed when RotaryEncoderImpl
+        // and friends are constructed - the pins are latched and interrupts attached there - so
+        // changing them needs a restart. send_bell is read each time a message is composed or sent.
+        if (moduleConfig.canned_message.rotary1_enabled == c.payload_variant.canned_message.rotary1_enabled &&
+            moduleConfig.canned_message.updown1_enabled == c.payload_variant.canned_message.updown1_enabled &&
+            moduleConfig.canned_message.inputbroker_pin_a == c.payload_variant.canned_message.inputbroker_pin_a &&
+            moduleConfig.canned_message.inputbroker_pin_b == c.payload_variant.canned_message.inputbroker_pin_b &&
+            moduleConfig.canned_message.inputbroker_pin_press == c.payload_variant.canned_message.inputbroker_pin_press &&
+            moduleConfig.canned_message.inputbroker_event_cw == c.payload_variant.canned_message.inputbroker_event_cw &&
+            moduleConfig.canned_message.inputbroker_event_ccw == c.payload_variant.canned_message.inputbroker_event_ccw &&
+            moduleConfig.canned_message.inputbroker_event_press == c.payload_variant.canned_message.inputbroker_event_press &&
+            moduleConfig.canned_message.enabled == c.payload_variant.canned_message.enabled &&
+            strcmp(moduleConfig.canned_message.allow_input_source, c.payload_variant.canned_message.allow_input_source) == 0) {
+            shouldReboot = false;
+        }
         moduleConfig.has_canned_message = true;
         moduleConfig.canned_message = c.payload_variant.canned_message;
         break;
     case meshtastic_ModuleConfig_audio_tag:
         LOG_INFO("Set module config: Audio");
+        // Nothing here applies live: the I2S pins and PTT are claimed when AudioModule sets up its
+        // driver, and the codec2 bitrate is fixed at the same point.
         moduleConfig.has_audio = true;
         moduleConfig.audio = c.payload_variant.audio;
         break;
     case meshtastic_ModuleConfig_remote_hardware_tag:
         LOG_INFO("Set module config: Remote Hardware");
+        // Only the pin allowlist is captured at boot - the module's constructor folds available_pins
+        // into an availablePins bitmask it uses for every later access check. enabled is tested in
+        // handleReceivedProtobuf() and allow_undefined_pin_access inside pinAccessAllowed(), both
+        // per request, so those two apply live.
+        if (moduleConfig.remote_hardware.available_pins_count == c.payload_variant.remote_hardware.available_pins_count &&
+            memcmp(moduleConfig.remote_hardware.available_pins, c.payload_variant.remote_hardware.available_pins,
+                   sizeof(moduleConfig.remote_hardware.available_pins)) == 0) {
+            shouldReboot = false;
+        }
         moduleConfig.has_remote_hardware = true;
         moduleConfig.remote_hardware = c.payload_variant.remote_hardware;
         break;
@@ -1083,6 +1136,11 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_ambient_lighting_tag:
         LOG_INFO("Set module config: Ambient Lighting");
+        // Tempting to make live - AmbientLightingThread::runOnce() re-reads all five fields every 30
+        // seconds - but the thread parks itself for good the moment led_state is off (its constructor
+        // and runOnce() both end in disable()), and nothing turns the LED off on the way out. So
+        // switching off would leave it lit and switching back on would never take. Making this live
+        // needs the thread to gain an explicit off path plus a nudge from here, like gps_mode has.
         moduleConfig.has_ambient_lighting = true;
         moduleConfig.ambient_lighting = c.payload_variant.ambient_lighting;
         break;
