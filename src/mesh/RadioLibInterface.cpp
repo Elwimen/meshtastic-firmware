@@ -494,6 +494,25 @@ bool RadioLibInterface::removePendingTXPacket(NodeNum from, PacketId id, uint32_
     return false;
 }
 
+bool RadioLibInterface::reconfigure()
+{
+    // Reconfiguring forces the radio into standby to reprogram the modem, which swallows the
+    // completion interrupt of anything still being transmitted - handleTransmitInterrupt() already
+    // notes that standby can do this. Nothing clears sendingPacket afterwards, so it stays set for
+    // good, and the "busyTx for more than 60s" check in canSendImmediately() then declares a
+    // hardware failure and reboots the node. That was harmless while every LoRa config change
+    // rebooted anyway; now that they apply live it is a real hang, so retire the packet here.
+    //
+    // The transmit was cut short, so counting it as sent slightly overstates TX airtime. That is
+    // preferable to leaking the packet, and it only happens when config changes mid-transmit.
+    if (sendingPacket) {
+        LOG_WARN("Reconfigure with a transmit in flight; retiring packet to avoid the busyTx watchdog");
+        completeSending();
+    }
+
+    return RadioInterface::reconfigure();
+}
+
 void RadioLibInterface::handleTransmitInterrupt()
 {
     // This can be null if we forced the device to enter standby mode.  In that case
