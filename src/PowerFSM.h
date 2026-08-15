@@ -47,6 +47,7 @@ class FakeFsm
 };
 extern FakeFsm powerFSM;
 void PowerFSM_setup();
+void PowerFSM_updateTimeouts();
 
 #else
 #include <Fsm.h>
@@ -54,4 +55,14 @@ extern Fsm powerFSM;
 extern State stateON, statePOWER, stateSERIAL, stateDARK;
 
 void PowerFSM_setup();
+
+/**
+ * Re-read the config-driven timed-transition intervals (screen_on_secs, min_wake_secs,
+ * wait_bluetooth_secs) and apply them to the transitions PowerFSM_setup() installed.
+ *
+ * Call this after those settings change so they take effect without a reboot. Only the intervals
+ * are updated - which transitions exist is decided at setup() from role and is_power_saving, so
+ * changing those still requires a restart.
+ */
+void PowerFSM_updateTimeouts();
 #endif
