@@ -29,7 +29,24 @@
 #if MESHTASTIC_EXCLUDE_POWER_FSM
 FakeFsm powerFSM;
 void PowerFSM_setup(){};
+void PowerFSM_updateTimeouts(){};
 #else
+
+// Timed transitions whose interval comes from config, kept so the interval can be refreshed when
+// that config changes instead of rebooting. Re-running PowerFSM_setup() is not an option: it appends
+// rather than replaces, and Fsm's timed-transition table holds only MAX_TIMED_TRANSITIONS entries.
+// A null entry means the transition was not installed on this build, or the table was full.
+static TimedTransition *screenOnTimeouts[3];
+static uint8_t screenOnTimeoutCount = 0;
+static TimedTransition *minWakeTimeout = NULL;
+static TimedTransition *bluetoothWaitTimeout = NULL;
+
+static void rememberScreenOnTimeout(TimedTransition *t)
+{
+    if (t && screenOnTimeoutCount < (sizeof(screenOnTimeouts) / sizeof(screenOnTimeouts[0])))
+        screenOnTimeouts[screenOnTimeoutCount++] = t;
+}
+
 /// Should we behave as if we have AC power now?
 static bool isPowered()
 {
@@ -362,12 +379,12 @@ void PowerFSM_setup()
     if (config.display.screen_on_secs > 0)
 #endif
     {
-        powerFSM.add_timed_transition(&stateON, &stateDARK,
-                                      Default::getConfiguredOrDefaultMs(config.display.screen_on_secs, default_screen_on_secs),
-                                      NULL, "Screen-on timeout");
-        powerFSM.add_timed_transition(&statePOWER, &stateDARK,
-                                      Default::getConfiguredOrDefaultMs(config.display.screen_on_secs, default_screen_on_secs),
-                                      NULL, "Screen-on timeout");
+        rememberScreenOnTimeout(powerFSM.add_timed_transition(
+            &stateON, &stateDARK, Default::getConfiguredOrDefaultMs(config.display.screen_on_secs, default_screen_on_secs), NULL,
+            "Screen-on timeout"));
+        rememberScreenOnTimeout(powerFSM.add_timed_transition(
+            &statePOWER, &stateDARK, Default::getConfiguredOrDefaultMs(config.display.screen_on_secs, default_screen_on_secs),
+            NULL, "Screen-on timeout"));
     }
 
 // We never enter light-sleep or NB states on NRF52 (because the CPU uses so little power normally)
@@ -382,31 +399,47 @@ void PowerFSM_setup()
                              config.device.role == meshtastic_Config_DeviceConfig_Role_SENSOR;
 
     if ((isRouter || config.power.is_power_saving) && !isWifiAvailable() && !isTrackerOrSensor) {
-        powerFSM.add_timed_transition(&stateNB, &stateLS,
-                                      Default::getConfiguredOrDefaultMs(config.power.min_wake_secs, default_min_wake_secs), NULL,
-                                      "Min wake timeout");
+        minWakeTimeout = powerFSM.add_timed_transition(
+            &stateNB, &stateLS, Default::getConfiguredOrDefaultMs(config.power.min_wake_secs, default_min_wake_secs), NULL,
+            "Min wake timeout");
 
         // If ESP32 and using power-saving, timer mover from DARK to light-sleep
         // Also serves purpose of the old DARK to DARK transition(?) See https://github.com/meshtastic/firmware/issues/3517
-        powerFSM.add_timed_transition(
+        bluetoothWaitTimeout = powerFSM.add_timed_transition(
             &stateDARK, &stateLS,
             Default::getConfiguredOrDefaultMs(config.power.wait_bluetooth_secs, default_wait_bluetooth_secs), NULL,
             "Bluetooth timeout");
     } else {
         // If ESP32, but not using power-saving, check periodically if config has drifted out of stateDark
-        powerFSM.add_timed_transition(&stateDARK, &stateDARK,
-                                      Default::getConfiguredOrDefaultMs(config.display.screen_on_secs, default_screen_on_secs),
-                                      NULL, "Screen-on timeout");
+        rememberScreenOnTimeout(powerFSM.add_timed_transition(
+            &stateDARK, &stateDARK, Default::getConfiguredOrDefaultMs(config.display.screen_on_secs, default_screen_on_secs),
+            NULL, "Screen-on timeout"));
     }
 #endif // HAS_WIFI || !defined(MESHTASTIC_EXCLUDE_WIFI)
 
 #else // (not) ARCH_ESP32
     // If not ESP32, light-sleep not used. Check periodically if config has drifted out of stateDark
-    powerFSM.add_timed_transition(&stateDARK, &stateDARK,
-                                  Default::getConfiguredOrDefaultMs(config.display.screen_on_secs, default_screen_on_secs), NULL,
-                                  "Screen-on timeout");
+    rememberScreenOnTimeout(powerFSM.add_timed_transition(
+        &stateDARK, &stateDARK, Default::getConfiguredOrDefaultMs(config.display.screen_on_secs, default_screen_on_secs), NULL,
+        "Screen-on timeout"));
 #endif
 
     powerFSM.run_machine(); // run one iteration of the state machine, so we run our on enter tasks for the initial DARK state
+}
+
+void PowerFSM_updateTimeouts()
+{
+    const uint32_t screenOnMs = Default::getConfiguredOrDefaultMs(config.display.screen_on_secs, default_screen_on_secs);
+    for (uint8_t i = 0; i < screenOnTimeoutCount; i++)
+        screenOnTimeouts[i]->interval = screenOnMs;
+
+    if (minWakeTimeout)
+        minWakeTimeout->interval = Default::getConfiguredOrDefaultMs(config.power.min_wake_secs, default_min_wake_secs);
+
+    if (bluetoothWaitTimeout)
+        bluetoothWaitTimeout->interval =
+            Default::getConfiguredOrDefaultMs(config.power.wait_bluetooth_secs, default_wait_bluetooth_secs);
+
+    LOG_INFO("PowerFSM timeouts updated: screen_on=%ums (%u transitions)", screenOnMs, screenOnTimeoutCount);
 }
 #endif

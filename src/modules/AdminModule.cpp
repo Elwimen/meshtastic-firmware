@@ -749,14 +749,12 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
         LOG_INFO("Set config: Power");
         config.has_power = true;
         // Only fields captured at boot force a reboot: the INA battery monitor is probed once in
-        // Power::setup(), is_power_saving decides which PowerFSM transitions get installed, and
-        // min_wake_secs/wait_bluetooth_secs are baked into timed-transition intervals.
-        // ls_secs, sds_secs and on_battery_shutdown_after_secs are read at point of use
-        // (PowerFSM lsEnter/sdsEnter, PowerFSMThread), so they take effect live.
+        // Power::setup(), and is_power_saving decides which PowerFSM transitions get installed at all.
+        // ls_secs, sds_secs and on_battery_shutdown_after_secs are read at point of use (PowerFSM
+        // lsEnter/sdsEnter, PowerFSMThread). min_wake_secs and wait_bluetooth_secs are baked into
+        // timed-transition intervals, but PowerFSM_updateTimeouts() rewrites those in place below.
         if (config.power.device_battery_ina_address == c.payload_variant.power.device_battery_ina_address &&
-            config.power.is_power_saving == c.payload_variant.power.is_power_saving &&
-            config.power.min_wake_secs == c.payload_variant.power.min_wake_secs &&
-            config.power.wait_bluetooth_secs == c.payload_variant.power.wait_bluetooth_secs) {
+            config.power.is_power_saving == c.payload_variant.power.is_power_saving) {
             requiresReboot = false;
         }
         config.power = c.payload_variant.power;
@@ -765,6 +763,7 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
             LOG_WARN("Tried to set on_battery_shutdown_after_secs too low, set to min 30 seconds");
             config.power.on_battery_shutdown_after_secs = 30;
         }
+        PowerFSM_updateTimeouts(); // pick up new min_wake_secs / wait_bluetooth_secs without restarting
         break;
     case meshtastic_Config_network_tag:
         LOG_INFO("Set config: WiFi");
@@ -774,8 +773,11 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
     case meshtastic_Config_display_tag:
         LOG_INFO("Set config: Display");
         config.has_display = true;
-        if (config.display.screen_on_secs == c.payload_variant.display.screen_on_secs &&
-            config.display.flip_screen == c.payload_variant.display.flip_screen &&
+        // screen_on_secs is baked into PowerFSM timed transitions at setup, but the intervals can be
+        // rewritten in place - see PowerFSM_updateTimeouts() below - so it no longer forces a reboot.
+        // flip_screen is applied once while the display driver is brought up, oled selects the driver
+        // itself, and displaymode decides which UI modules get constructed, so those still do.
+        if (config.display.flip_screen == c.payload_variant.display.flip_screen &&
             config.display.oled == c.payload_variant.display.oled &&
             config.display.displaymode == c.payload_variant.display.displaymode) {
             requiresReboot = false;
@@ -793,6 +795,7 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
         }
 #endif
         config.display = c.payload_variant.display;
+        PowerFSM_updateTimeouts(); // pick up a new screen_on_secs without restarting
         break;
 
     case meshtastic_Config_lora_tag: {
