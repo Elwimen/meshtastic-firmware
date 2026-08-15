@@ -650,10 +650,13 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
             accelerometerThread->start();
         }
 #endif
+        // Only fields captured at boot force a reboot. button_gpio is bound by pinMode()/interrupt
+        // registration in InputBroker, and role decides which PowerFSM transitions get installed.
+        // buzzer_gpio (buzz.cpp, ExternalNotificationModule) and rebroadcast_mode (FloodingRouter,
+        // NextHopRouter, Router, RoutingModule) are read at point of use on every call, so they
+        // take effect live.
         if (config.device.button_gpio == c.payload_variant.device.button_gpio &&
-            config.device.buzzer_gpio == c.payload_variant.device.buzzer_gpio &&
-            config.device.role == c.payload_variant.device.role &&
-            config.device.rebroadcast_mode == c.payload_variant.device.rebroadcast_mode) {
+            config.device.role == c.payload_variant.device.role) {
             requiresReboot = false;
         }
         config.device = c.payload_variant.device;
@@ -692,9 +695,30 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
         }
 #endif
         break;
-    case meshtastic_Config_position_tag:
+    case meshtastic_Config_position_tag: {
         LOG_INFO("Set config: Position");
         config.has_position = true;
+#if !MESHTASTIC_EXCLUDE_GPS
+        const bool gpsWasEnabled = config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED;
+#endif
+        // Only the GPS pin assignments are captured at boot, by GPS::setup(). The rest of this
+        // section - broadcast intervals, gps_update_interval, gps_mode, fixed_position, flags - is
+        // read at point of use by GPS, GPSUpdateScheduling and PositionModule, so it applies live.
+        // gps_mode in particular is already toggled at runtime from the on-device menu.
+        if (config.position.rx_gpio == c.payload_variant.position.rx_gpio &&
+            config.position.tx_gpio == c.payload_variant.position.tx_gpio &&
+            config.position.gps_en_gpio == c.payload_variant.position.gps_en_gpio) {
+            requiresReboot = false;
+        }
+#if !MESHTASTIC_EXCLUDE_GPS
+        // NOT_PRESENT is the one gps_mode transition that cannot be done live: main.cpp skips
+        // GPS::createGps() altogether when the stored mode is NOT_PRESENT, so there is no GPS
+        // object to hand the new mode to. Leaving NOT_PRESENT still needs a reboot to build one.
+        if (gps == nullptr && config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT &&
+            c.payload_variant.position.gps_mode != meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT) {
+            requiresReboot = true;
+        }
+#endif
         // If we have turned off the GPS (disabled or not present) and we're not using fixed position,
         // clear the stored position since it may not get updated
         if (config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
@@ -704,19 +728,34 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
             saveChanges(SEGMENT_NODEDATABASE | SEGMENT_CONFIG, false);
         }
         config.position = c.payload_variant.position;
+#if !MESHTASTIC_EXCLUDE_GPS
+        // The GPS thread parks itself when gps_mode is not ENABLED (runOnce() returns disable(), which
+        // sets the interval to INT32_MAX), so it cannot notice a later change on its own. Push the new
+        // mode to it here, the same way toggleGpsMode() does for the on-device menu - otherwise a
+        // DISABLED -> ENABLED switch would silently do nothing until the next boot.
+        const bool gpsNowEnabled = config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED;
+        if (gps != nullptr && gpsNowEnabled != gpsWasEnabled) {
+            if (gpsNowEnabled)
+                gps->enable();
+            else
+                gps->disable();
+        }
+#endif
 
         // Save nodedb as well in case we got a fixed position packet
         break;
+    }
     case meshtastic_Config_power_tag:
         LOG_INFO("Set config: Power");
         config.has_power = true;
-        // Really just the adc override is the only thing that can change without a reboot
+        // Only fields captured at boot force a reboot: the INA battery monitor is probed once in
+        // Power::setup(), is_power_saving decides which PowerFSM transitions get installed, and
+        // min_wake_secs/wait_bluetooth_secs are baked into timed-transition intervals.
+        // ls_secs, sds_secs and on_battery_shutdown_after_secs are read at point of use
+        // (PowerFSM lsEnter/sdsEnter, PowerFSMThread), so they take effect live.
         if (config.power.device_battery_ina_address == c.payload_variant.power.device_battery_ina_address &&
             config.power.is_power_saving == c.payload_variant.power.is_power_saving &&
-            config.power.ls_secs == c.payload_variant.power.ls_secs &&
             config.power.min_wake_secs == c.payload_variant.power.min_wake_secs &&
-            config.power.on_battery_shutdown_after_secs == c.payload_variant.power.on_battery_shutdown_after_secs &&
-            config.power.sds_secs == c.payload_variant.power.sds_secs &&
             config.power.wait_bluetooth_secs == c.payload_variant.power.wait_bluetooth_secs) {
             requiresReboot = false;
         }
@@ -865,8 +904,10 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
         config.has_bluetooth = true;
         config.bluetooth = c.payload_variant.bluetooth;
         break;
-    case meshtastic_Config_security_tag:
+    case meshtastic_Config_security_tag: {
         LOG_INFO("Set config: Security");
+        // Keep the previous identity so a real key rotation can be told apart from any other change.
+        meshtastic_Config_SecurityConfig oldSecurity = config.security;
         config.security = c.payload_variant.security;
 #if !(MESHTASTIC_EXCLUDE_PKI_KEYGEN) && !(MESHTASTIC_EXCLUDE_PKI)
         // If the client set the key to blank, go ahead and regenerate so long as we're not in ham mode
@@ -894,11 +935,19 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
             sendWarning(warning);
         }
 
-        if (config.security.debug_log_api_enabled == c.payload_variant.security.debug_log_api_enabled &&
-            config.security.serial_enabled == c.payload_variant.security.serial_enabled)
-            requiresReboot = false;
+        // Only an identity change forces a reboot: my_node_num is derived from the public key in
+        // NodeDB::init(), so rotating the keypair on a running node would orphan it on the mesh -
+        // cached routes, the BLE identity and every neighbour's entry for us still name the old num.
+        // The rest of this section (admin keys, is_managed, serial_enabled, debug_log_api_enabled)
+        // is consulted at point of use and applies live.
+        // NB: the check this replaces compared config.security against the incoming payload *after*
+        // the assignment above, so it was always true - security config never rebooted at all.
+        requiresReboot =
+            config.security.public_key.size != oldSecurity.public_key.size ||
+            memcmp(config.security.public_key.bytes, oldSecurity.public_key.bytes, config.security.public_key.size) != 0;
 
         break;
+    }
     case meshtastic_Config_device_ui_tag:
         // NOOP! This is handled by handleStoreDeviceUIConfig
         break;
@@ -913,12 +962,6 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
 bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
 {
     bool shouldReboot = true;
-    // If we are in an open transaction or configuring MQTT or Serial (which have validation), defer disabling Bluetooth
-    // Otherwise, disable Bluetooth to prevent the phone from interfering with the config
-    if (!hasOpenEditTransaction && !IS_ONE_OF(c.which_payload_variant, meshtastic_ModuleConfig_mqtt_tag,
-                                              meshtastic_ModuleConfig_serial_tag, meshtastic_ModuleConfig_statusmessage_tag)) {
-        disableBluetooth();
-    }
 
     switch (c.which_payload_variant) {
     case meshtastic_ModuleConfig_mqtt_tag:
@@ -930,8 +973,10 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         if (!MQTT::isValidConfig(c.payload_variant.mqtt)) {
             return false;
         }
-        // Disable Bluetooth to prevent interference during MQTT configuration
-        disableBluetooth();
+        // Left rebooting deliberately: broker address, credentials, TLS and the proxy/JSON options
+        // are read when the MQTT client establishes its connection, so applying them live would need
+        // a disconnect/reconnect path that does not exist yet. Splitting this section is only
+        // worthwhile alongside that work.
         moduleConfig.has_mqtt = true;
         moduleConfig.mqtt = c.payload_variant.mqtt;
 #endif
@@ -944,48 +989,131 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
             LOG_ERROR("Invalid serial config");
             return false;
         }
-        disableBluetooth(); // Disable Bluetooth to prevent interference during Serial configuration
 #endif
+        // enabled gates construction in setupModules(), and the port selection, pins, baud, mode and
+        // timeout are all consumed while SerialModule brings its UART up. echo is checked each time a
+        // packet is sent out, so it is the only field that takes effect live.
+        if (moduleConfig.serial.enabled == c.payload_variant.serial.enabled &&
+            moduleConfig.serial.rxd == c.payload_variant.serial.rxd && moduleConfig.serial.txd == c.payload_variant.serial.txd &&
+            moduleConfig.serial.baud == c.payload_variant.serial.baud &&
+            moduleConfig.serial.mode == c.payload_variant.serial.mode &&
+            moduleConfig.serial.timeout == c.payload_variant.serial.timeout &&
+            moduleConfig.serial.override_console_serial_port == c.payload_variant.serial.override_console_serial_port) {
+            shouldReboot = false;
+        }
         moduleConfig.has_serial = true;
         moduleConfig.serial = c.payload_variant.serial;
         break;
     case meshtastic_ModuleConfig_external_notification_tag:
         LOG_INFO("Set module config: External Notification");
+        // The module is always constructed, but its setup() only claims the output pins when enabled
+        // was set at boot, and those pinMode() calls capture output/output_vibra/output_buzzer plus
+        // the PWM and I2S buzzer choices. Everything else - the alert_* routing flags, output_ms,
+        // nag_timeout and the active polarity - is consulted when a notification actually fires.
+        if (moduleConfig.external_notification.enabled == c.payload_variant.external_notification.enabled &&
+            moduleConfig.external_notification.output == c.payload_variant.external_notification.output &&
+            moduleConfig.external_notification.output_vibra == c.payload_variant.external_notification.output_vibra &&
+            moduleConfig.external_notification.output_buzzer == c.payload_variant.external_notification.output_buzzer &&
+            moduleConfig.external_notification.use_pwm == c.payload_variant.external_notification.use_pwm &&
+            moduleConfig.external_notification.use_i2s_as_buzzer == c.payload_variant.external_notification.use_i2s_as_buzzer) {
+            shouldReboot = false;
+        }
         moduleConfig.has_external_notification = true;
         moduleConfig.external_notification = c.payload_variant.external_notification;
         break;
     case meshtastic_ModuleConfig_store_forward_tag:
         LOG_INFO("Set module config: Store & Forward");
+        // No field here can be applied live: StoreForwardModule's constructor copies records,
+        // history_return_max, history_return_window and heartbeat into its own members (and sizes
+        // its heap allocation from records), so the module never re-reads them. enabled and
+        // is_server additionally gate its construction in setupModules().
         moduleConfig.has_store_forward = true;
         moduleConfig.store_forward = c.payload_variant.store_forward;
         break;
     case meshtastic_ModuleConfig_range_test_tag:
         LOG_INFO("Set module config: Range Test");
+        // enabled gates construction in setupModules(), sender is baked into the thread interval at
+        // startup, and clear_on_reboot is only meaningful across a restart. save is read when a
+        // result is actually written, so it is the one field that applies live.
+        if (moduleConfig.range_test.enabled == c.payload_variant.range_test.enabled &&
+            moduleConfig.range_test.sender == c.payload_variant.range_test.sender &&
+            moduleConfig.range_test.clear_on_reboot == c.payload_variant.range_test.clear_on_reboot) {
+            shouldReboot = false;
+        }
         moduleConfig.has_range_test = true;
         moduleConfig.range_test = c.payload_variant.range_test;
         break;
-    case meshtastic_ModuleConfig_telemetry_tag:
+    case meshtastic_ModuleConfig_telemetry_tag: {
         LOG_INFO("Set module config: Telemetry");
+        // The *_enabled / *_screen_enabled flags decide in setupModules() whether a telemetry module
+        // is constructed at all, and the modules that are always constructed park themselves for good
+        // when their flags are off (HealthTelemetryModule::runOnce() returns disable()), so a thread
+        // that was switched off cannot notice being switched back on. Those flags still need a reboot.
+        // The intervals and the Fahrenheit display flag are re-read on every run, so they apply live.
+        const auto &t = c.payload_variant.telemetry;
+        if (moduleConfig.telemetry.environment_measurement_enabled == t.environment_measurement_enabled &&
+            moduleConfig.telemetry.environment_screen_enabled == t.environment_screen_enabled &&
+            moduleConfig.telemetry.air_quality_enabled == t.air_quality_enabled &&
+            moduleConfig.telemetry.air_quality_screen_enabled == t.air_quality_screen_enabled &&
+            moduleConfig.telemetry.power_measurement_enabled == t.power_measurement_enabled &&
+            moduleConfig.telemetry.power_screen_enabled == t.power_screen_enabled &&
+            moduleConfig.telemetry.health_measurement_enabled == t.health_measurement_enabled &&
+            moduleConfig.telemetry.health_screen_enabled == t.health_screen_enabled) {
+            shouldReboot = false;
+        }
         moduleConfig.has_telemetry = true;
-        moduleConfig.telemetry = c.payload_variant.telemetry;
+        moduleConfig.telemetry = t;
         break;
+    }
     case meshtastic_ModuleConfig_canned_message_tag:
         LOG_INFO("Set module config: Canned Message");
+        // The rotary/up-down input pins and their event codes are consumed when RotaryEncoderImpl
+        // and friends are constructed - the pins are latched and interrupts attached there - so
+        // changing them needs a restart. send_bell is read each time a message is composed or sent.
+        if (moduleConfig.canned_message.rotary1_enabled == c.payload_variant.canned_message.rotary1_enabled &&
+            moduleConfig.canned_message.updown1_enabled == c.payload_variant.canned_message.updown1_enabled &&
+            moduleConfig.canned_message.inputbroker_pin_a == c.payload_variant.canned_message.inputbroker_pin_a &&
+            moduleConfig.canned_message.inputbroker_pin_b == c.payload_variant.canned_message.inputbroker_pin_b &&
+            moduleConfig.canned_message.inputbroker_pin_press == c.payload_variant.canned_message.inputbroker_pin_press &&
+            moduleConfig.canned_message.inputbroker_event_cw == c.payload_variant.canned_message.inputbroker_event_cw &&
+            moduleConfig.canned_message.inputbroker_event_ccw == c.payload_variant.canned_message.inputbroker_event_ccw &&
+            moduleConfig.canned_message.inputbroker_event_press == c.payload_variant.canned_message.inputbroker_event_press &&
+            moduleConfig.canned_message.enabled == c.payload_variant.canned_message.enabled &&
+            strcmp(moduleConfig.canned_message.allow_input_source, c.payload_variant.canned_message.allow_input_source) == 0) {
+            shouldReboot = false;
+        }
         moduleConfig.has_canned_message = true;
         moduleConfig.canned_message = c.payload_variant.canned_message;
         break;
     case meshtastic_ModuleConfig_audio_tag:
         LOG_INFO("Set module config: Audio");
+        // Nothing here applies live: the I2S pins and PTT are claimed when AudioModule sets up its
+        // driver, and the codec2 bitrate is fixed at the same point.
         moduleConfig.has_audio = true;
         moduleConfig.audio = c.payload_variant.audio;
         break;
     case meshtastic_ModuleConfig_remote_hardware_tag:
         LOG_INFO("Set module config: Remote Hardware");
+        // Only the pin allowlist is captured at boot - the module's constructor folds available_pins
+        // into an availablePins bitmask it uses for every later access check. enabled is tested in
+        // handleReceivedProtobuf() and allow_undefined_pin_access inside pinAccessAllowed(), both
+        // per request, so those two apply live.
+        if (moduleConfig.remote_hardware.available_pins_count == c.payload_variant.remote_hardware.available_pins_count &&
+            memcmp(moduleConfig.remote_hardware.available_pins, c.payload_variant.remote_hardware.available_pins,
+                   sizeof(moduleConfig.remote_hardware.available_pins)) == 0) {
+            shouldReboot = false;
+        }
         moduleConfig.has_remote_hardware = true;
         moduleConfig.remote_hardware = c.payload_variant.remote_hardware;
         break;
     case meshtastic_ModuleConfig_neighbor_info_tag:
         LOG_INFO("Set module config: Neighbor Info");
+        // enabled gates the module's construction in setupModules(). update_interval is re-read by
+        // getIntervalMs() on every reschedule and transmit_over_lora at NeighborInfoModule.cpp:127,
+        // so both apply live.
+        if (moduleConfig.neighbor_info.enabled == c.payload_variant.neighbor_info.enabled) {
+            shouldReboot = false;
+        }
         moduleConfig.has_neighbor_info = true;
         moduleConfig.neighbor_info = c.payload_variant.neighbor_info;
         if (moduleConfig.neighbor_info.update_interval < min_neighbor_info_broadcast_secs) {
@@ -995,16 +1123,37 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_detection_sensor_tag:
         LOG_INFO("Set module config: Detection Sensor");
+        // enabled gates construction in setupModules(); monitor_pin and use_pullup are bound by the
+        // pinMode() call in DetectionSensorModule::setup(). The broadcast intervals, trigger type,
+        // name and send_bell are read at point of use each run, so they apply live.
+        if (moduleConfig.detection_sensor.enabled == c.payload_variant.detection_sensor.enabled &&
+            moduleConfig.detection_sensor.monitor_pin == c.payload_variant.detection_sensor.monitor_pin &&
+            moduleConfig.detection_sensor.use_pullup == c.payload_variant.detection_sensor.use_pullup) {
+            shouldReboot = false;
+        }
         moduleConfig.has_detection_sensor = true;
         moduleConfig.detection_sensor = c.payload_variant.detection_sensor;
         break;
     case meshtastic_ModuleConfig_ambient_lighting_tag:
         LOG_INFO("Set module config: Ambient Lighting");
+        // Tempting to make live - AmbientLightingThread::runOnce() re-reads all five fields every 30
+        // seconds - but the thread parks itself for good the moment led_state is off (its constructor
+        // and runOnce() both end in disable()), and nothing turns the LED off on the way out. So
+        // switching off would leave it lit and switching back on would never take. Making this live
+        // needs the thread to gain an explicit off path plus a nudge from here, like gps_mode has.
         moduleConfig.has_ambient_lighting = true;
         moduleConfig.ambient_lighting = c.payload_variant.ambient_lighting;
         break;
     case meshtastic_ModuleConfig_paxcounter_tag:
         LOG_INFO("Set module config: Paxcounter");
+        // enabled gates construction in setupModules(), and the two RSSI thresholds are copied into
+        // the libpax configuration struct during PaxcounterModule setup. Only the update interval is
+        // re-read on each run, so that is the one field that applies live.
+        if (moduleConfig.paxcounter.enabled == c.payload_variant.paxcounter.enabled &&
+            moduleConfig.paxcounter.wifi_threshold == c.payload_variant.paxcounter.wifi_threshold &&
+            moduleConfig.paxcounter.ble_threshold == c.payload_variant.paxcounter.ble_threshold) {
+            shouldReboot = false;
+        }
         moduleConfig.has_paxcounter = true;
         moduleConfig.paxcounter = c.payload_variant.paxcounter;
         break;
@@ -1014,6 +1163,14 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         moduleConfig.statusmessage = c.payload_variant.statusmessage;
         shouldReboot = false;
         break;
+    }
+    // Only tear Bluetooth down when a reboot is actually coming: on ESP32 the BLE stack cannot be
+    // brought back without one, because disableBluetooth() releases the controller's RAM to the
+    // general heap. Gating on shouldReboot rather than a hand-maintained list of exempt sections
+    // means a section that opts out of rebooting can no longer leave the radio dead until the user
+    // power-cycles the node. This mirrors what handleSetConfig() already does with requiresReboot.
+    if (shouldReboot && !hasOpenEditTransaction) {
+        disableBluetooth();
     }
     saveChanges(SEGMENT_MODULECONFIG, shouldReboot);
     return true;

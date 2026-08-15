@@ -1734,13 +1734,12 @@ void menuHandler::GPSSmartPositionMenu()
         } else if (selected == 1) {
             config.position.position_broadcast_smart_enabled = true;
             saveUIConfig();
+            // PositionModule reads this on every broadcast decision, so it applies live.
             service->reloadConfig(SEGMENT_CONFIG);
-            rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
         } else if (selected == 2) {
             config.position.position_broadcast_smart_enabled = false;
             saveUIConfig();
             service->reloadConfig(SEGMENT_CONFIG);
-            rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
         }
     };
     bannerOptions.InitialSelected = config.position.position_broadcast_smart_enabled ? 1 : 2;
@@ -1794,8 +1793,8 @@ void menuHandler::GPSUpdateIntervalMenu()
 
         if (selected != 0) {
             saveUIConfig();
+            // GPS and GPSUpdateScheduling read the interval each cycle, so it applies live.
             service->reloadConfig(SEGMENT_CONFIG);
-            rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
         }
     };
 
@@ -1884,8 +1883,8 @@ void menuHandler::GPSPositionBroadcastMenu()
 
         if (selected != 0) {
             saveUIConfig();
+            // PositionModule re-reads the interval on each run, so it applies live.
             service->reloadConfig(SEGMENT_CONFIG);
-            rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
         }
     };
 
