@@ -46,6 +46,18 @@ const static DetectionSensorTriggerHandler handlers[_meshtastic_ModuleConfig_Det
     [meshtastic_ModuleConfig_DetectionSensorConfig_TriggerType_EITHER_EDGE_ACTIVE_HIGH] = detection_trigger_either_edge,
 };
 
+DetectionSensorModule::~DetectionSensorModule()
+{
+    // Base destructors already deregister packet dispatch and the thread; this only has to undo
+    // what setup did to the hardware. boundPin (not current config) is what was actually claimed.
+    if (boundPin > 0)
+        pinMode(boundPin, INPUT); // drop the pullup if one was enabled
+#ifdef DETECTION_SENSOR_EN
+    if (!firstTime)
+        digitalWrite(DETECTION_SENSOR_EN, LOW); // power the sensor back down
+#endif
+}
+
 int32_t DetectionSensorModule::runOnce()
 {
     /*
@@ -74,7 +86,8 @@ int32_t DetectionSensorModule::runOnce()
         // This is the first time the OSThread library has called this function, so do some setup
         firstTime = false;
         if (moduleConfig.detection_sensor.monitor_pin > 0) {
-            pinMode(moduleConfig.detection_sensor.monitor_pin, moduleConfig.detection_sensor.use_pullup ? INPUT_PULLUP : INPUT);
+            boundPin = moduleConfig.detection_sensor.monitor_pin;
+            pinMode(boundPin, moduleConfig.detection_sensor.use_pullup ? INPUT_PULLUP : INPUT);
         } else {
             LOG_WARN("Detection Sensor Module: Set to enabled but no monitor pin is set. Disable module");
             return disable();

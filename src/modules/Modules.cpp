@@ -116,6 +116,13 @@ static bool wantNeighborInfoModule()
 }
 #endif
 
+#if !MESHTASTIC_EXCLUDE_DETECTIONSENSOR
+static bool wantDetectionSensorModule()
+{
+    return moduleConfig.has_detection_sensor && moduleConfig.detection_sensor.enabled;
+}
+#endif
+
 void setupModules()
 {
 #if (HAS_BUTTON || ARCH_PORTDUINO) && !MESHTASTIC_EXCLUDE_INPUTBROKER
@@ -153,7 +160,7 @@ void setupModules()
     }
 #endif
 #if !MESHTASTIC_EXCLUDE_DETECTIONSENSOR
-    if (moduleConfig.has_detection_sensor && moduleConfig.detection_sensor.enabled) {
+    if (wantDetectionSensorModule()) {
         detectionSensorModule = new DetectionSensorModule();
     }
 #endif
@@ -282,6 +289,21 @@ void reconcileModules()
     bool changed = false;
 
     // One block per convertible module, added as each is taught to tear down cleanly.
+
+#if !MESHTASTIC_EXCLUDE_DETECTIONSENSOR
+    // Hardware is handled by the module's destructor (drops the pullup on the pin it bound,
+    // powers the sensor down); no other code references the global at all.
+    if (wantDetectionSensorModule() && !detectionSensorModule) {
+        LOG_INFO("Enable DetectionSensorModule");
+        detectionSensorModule = new DetectionSensorModule();
+        changed = true;
+    } else if (!wantDetectionSensorModule() && detectionSensorModule) {
+        LOG_INFO("Disable DetectionSensorModule");
+        delete detectionSensorModule;
+        detectionSensorModule = nullptr;
+        changed = true;
+    }
+#endif
 
 #if !MESHTASTIC_EXCLUDE_NEIGHBORINFO
     // Safe to create/destroy live: registrations (module vector, thread controller, nodeStatus

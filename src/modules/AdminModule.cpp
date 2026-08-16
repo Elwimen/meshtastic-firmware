@@ -1148,12 +1148,17 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_detection_sensor_tag:
         LOG_INFO("Set module config: Detection Sensor");
-        // enabled gates construction in setupModules(); monitor_pin and use_pullup are bound by the
-        // pinMode() call in DetectionSensorModule::setup(). The broadcast intervals, trigger type,
-        // name and send_bell are read at point of use each run, so they apply live.
-        if (moduleConfig.detection_sensor.enabled == c.payload_variant.detection_sensor.enabled &&
-            moduleConfig.detection_sensor.monitor_pin == c.payload_variant.detection_sensor.monitor_pin &&
-            moduleConfig.detection_sensor.use_pullup == c.payload_variant.detection_sensor.use_pullup) {
+        // An enabled change goes through the deferred module reconcile: teardown restores the pin
+        // via the module's destructor, and a fresh construction binds whatever pin the new config
+        // names. The one case that still needs a reboot is a pin/pullup change while the module
+        // keeps running - there is no live rebind path. Intervals, trigger type, name and
+        // send_bell are read at point of use each run.
+        if (moduleConfig.detection_sensor.enabled != c.payload_variant.detection_sensor.enabled) {
+            requestModuleReconcile();
+            shouldReboot = false;
+        } else if (!moduleConfig.detection_sensor.enabled ||
+                   (moduleConfig.detection_sensor.monitor_pin == c.payload_variant.detection_sensor.monitor_pin &&
+                    moduleConfig.detection_sensor.use_pullup == c.payload_variant.detection_sensor.use_pullup)) {
             shouldReboot = false;
         }
         moduleConfig.has_detection_sensor = true;
