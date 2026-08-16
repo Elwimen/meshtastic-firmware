@@ -55,10 +55,14 @@
 #include "modules/Telemetry/DeviceTelemetry.h"
 #endif
 #if HAS_SENSOR && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
+#include "detect/ScanI2CConsumer.h"
+#include "detect/ScanI2CTwoWire.h"
 #include "main.h"
 #include "modules/Telemetry/EnvironmentTelemetry.h"
 #include "modules/Telemetry/HealthTelemetry.h"
 #include "modules/Telemetry/Sensor/TelemetrySensor.h"
+#include <memory>
+extern std::unique_ptr<ScanI2CTwoWire> i2cScanner;
 #endif
 #if HAS_SENSOR && !MESHTASTIC_EXCLUDE_AIR_QUALITY_SENSOR
 #include "main.h"
@@ -136,6 +140,28 @@ static bool wantSerialModule()
 {
     return moduleConfig.has_serial && moduleConfig.serial.enabled &&
            config.display.displaymode != meshtastic_Config_DisplayConfig_DisplayMode_COLOR;
+}
+#endif
+
+#if HAS_TELEMETRY && HAS_SENSOR && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
+static bool wantEnvironmentTelemetryModule()
+{
+    return moduleConfig.has_telemetry &&
+           (moduleConfig.telemetry.environment_measurement_enabled || moduleConfig.telemetry.environment_screen_enabled);
+}
+#if HAS_TELEMETRY && HAS_SENSOR && !MESHTASTIC_EXCLUDE_AIR_QUALITY_SENSOR
+static bool wantAirQualityTelemetryModule()
+{
+    return moduleConfig.has_telemetry &&
+           (moduleConfig.telemetry.air_quality_enabled || moduleConfig.telemetry.air_quality_screen_enabled);
+}
+#endif
+#endif
+#if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_POWER_TELEMETRY && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
+static bool wantPowerTelemetryModule()
+{
+    return moduleConfig.has_telemetry &&
+           (moduleConfig.telemetry.power_measurement_enabled || moduleConfig.telemetry.power_screen_enabled);
 }
 #endif
 
@@ -221,14 +247,12 @@ void setupModules()
     new DeviceTelemetryModule();
 #endif
 #if HAS_TELEMETRY && HAS_SENSOR && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
-    if (moduleConfig.has_telemetry &&
-        (moduleConfig.telemetry.environment_measurement_enabled || moduleConfig.telemetry.environment_screen_enabled)) {
-        new EnvironmentTelemetryModule();
+    if (wantEnvironmentTelemetryModule()) {
+        environmentTelemetryModule = new EnvironmentTelemetryModule();
     }
 #if HAS_TELEMETRY && HAS_SENSOR && !MESHTASTIC_EXCLUDE_AIR_QUALITY_SENSOR
-    if (moduleConfig.has_telemetry &&
-        (moduleConfig.telemetry.air_quality_enabled || moduleConfig.telemetry.air_quality_screen_enabled)) {
-        new AirQualityTelemetryModule();
+    if (wantAirQualityTelemetryModule()) {
+        airQualityTelemetryModule = new AirQualityTelemetryModule();
     }
 #endif
 #if !MESHTASTIC_EXCLUDE_HEALTH_TELEMETRY
@@ -239,9 +263,8 @@ void setupModules()
 #endif
 #endif
 #if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_POWER_TELEMETRY && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
-    if (moduleConfig.has_telemetry &&
-        (moduleConfig.telemetry.power_measurement_enabled || moduleConfig.telemetry.power_screen_enabled)) {
-        new PowerTelemetryModule();
+    if (wantPowerTelemetryModule()) {
+        powerTelemetryModule = new PowerTelemetryModule();
     }
 #endif
 #if (defined(ARCH_ESP32) || defined(ARCH_NRF52) || defined(ARCH_RP2040) || defined(ARCH_STM32WL)) &&                             \
@@ -363,6 +386,53 @@ void reconcileModules()
         LOG_INFO("Disable NeighborInfoModule");
         delete neighborInfoModule;
         neighborInfoModule = nullptr;
+        changed = true;
+    }
+#endif
+
+#if HAS_TELEMETRY && HAS_SENSOR && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
+    if (wantEnvironmentTelemetryModule() && !environmentTelemetryModule) {
+        LOG_INFO("Enable EnvironmentTelemetryModule");
+        environmentTelemetryModule = new EnvironmentTelemetryModule();
+        changed = true;
+    } else if (!wantEnvironmentTelemetryModule() && environmentTelemetryModule) {
+        LOG_INFO("Disable EnvironmentTelemetryModule");
+        delete environmentTelemetryModule;
+        environmentTelemetryModule = nullptr;
+        changed = true;
+    }
+    // Sensor discovery normally runs from the boot I2C scan, which a live-created instance (or an
+    // instance created for the screen flag only, before measurement was enabled) has missed. The
+    // scan results are kept alive in i2cScanner, discovery is once-per-boot idempotent, and
+    // i2cScanFinished is public on the ScanI2CConsumer interface.
+    if (environmentTelemetryModule && i2cScanner)
+        static_cast<ScanI2CConsumer *>(environmentTelemetryModule)->i2cScanFinished(i2cScanner.get());
+#if HAS_TELEMETRY && HAS_SENSOR && !MESHTASTIC_EXCLUDE_AIR_QUALITY_SENSOR
+    if (wantAirQualityTelemetryModule() && !airQualityTelemetryModule) {
+        LOG_INFO("Enable AirQualityTelemetryModule");
+        airQualityTelemetryModule = new AirQualityTelemetryModule();
+        changed = true;
+    } else if (!wantAirQualityTelemetryModule() && airQualityTelemetryModule) {
+        LOG_INFO("Disable AirQualityTelemetryModule");
+        delete airQualityTelemetryModule;
+        airQualityTelemetryModule = nullptr;
+        changed = true;
+    }
+    if (airQualityTelemetryModule && i2cScanner)
+        static_cast<ScanI2CConsumer *>(airQualityTelemetryModule)->i2cScanFinished(i2cScanner.get());
+#endif
+#endif
+#if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_POWER_TELEMETRY && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
+    // PowerTelemetry finds its sensors through the global nodeTelemetrySensorsMap, which is
+    // populated at boot and survives, so no discovery re-fire is needed.
+    if (wantPowerTelemetryModule() && !powerTelemetryModule) {
+        LOG_INFO("Enable PowerTelemetryModule");
+        powerTelemetryModule = new PowerTelemetryModule();
+        changed = true;
+    } else if (!wantPowerTelemetryModule() && powerTelemetryModule) {
+        LOG_INFO("Disable PowerTelemetryModule");
+        delete powerTelemetryModule;
+        powerTelemetryModule = nullptr;
         changed = true;
     }
 #endif

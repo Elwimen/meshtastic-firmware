@@ -36,11 +36,27 @@ static constexpr uint16_t TX_HISTORY_KEY_AIR_QUALITY_TELEMETRY = 0x8004;
 #include "Sensor/SCD30Sensor.h"
 #endif
 
+AirQualityTelemetryModule *airQualityTelemetryModule;
+
+AirQualityTelemetryModule::~AirQualityTelemetryModule()
+{
+    if (lastMeasurementPacket) {
+        packetPool.release(lastMeasurementPacket);
+        lastMeasurementPacket = nullptr;
+    }
+}
+
 void AirQualityTelemetryModule::i2cScanFinished(ScanI2C *i2cScanner)
 {
     if (!moduleConfig.telemetry.air_quality_enabled && !AIR_QUALITY_TELEMETRY_MODULE_ENABLE) {
         return;
     }
+    // See EnvironmentTelemetry: discovery is once-per-boot, the sensor list outlives the module.
+    static bool sensorsAdded = false;
+    if (sensorsAdded)
+        return;
+    sensorsAdded = true;
+
     LOG_INFO("Air Quality Telemetry adding I2C devices...");
 
     /*

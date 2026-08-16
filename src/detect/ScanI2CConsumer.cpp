@@ -8,6 +8,11 @@ ScanI2CConsumer::ScanI2CConsumer()
     ScanI2CConsumers.push_front(this);
 }
 
+ScanI2CConsumer::~ScanI2CConsumer()
+{
+    ScanI2CConsumers.remove(this);
+}
+
 void ScanI2CCompleted(ScanI2C *i2cScanner)
 {
     for (ScanI2CConsumer *consumer : ScanI2CConsumers) {

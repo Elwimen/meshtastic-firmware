@@ -224,6 +224,9 @@ bool pmu_found;
 #if !MESHTASTIC_EXCLUDE_I2C
 // Array map of sensor types with i2c address and wire as we'll find in the i2c scan
 std::pair<uint8_t, TwoWire *> nodeTelemetrySensorsMap[_meshtastic_TelemetrySensorType_MAX + 1] = {};
+// Boot I2C scan results. Deliberately outlives setup() so reconcileModules() can re-run sensor
+// discovery for telemetry modules that are enabled at runtime.
+std::unique_ptr<ScanI2CTwoWire> i2cScanner;
 #endif
 
 Router *router = NULL; // Users of router don't care what sort of subclass implements that API
@@ -533,7 +536,9 @@ void setup()
 #if !MESHTASTIC_EXCLUDE_I2C
     // We need to scan here to decide if we have a screen for nodeDB.init() and because power has been applied to
     // accessories
-    auto i2cScanner = std::unique_ptr<ScanI2CTwoWire>(new ScanI2CTwoWire());
+    // Deliberately outlives setup() (global below): live-enabled telemetry modules re-run sensor
+    // discovery against these scan results from reconcileModules().
+    i2cScanner = std::unique_ptr<ScanI2CTwoWire>(new ScanI2CTwoWire());
 #if HAS_WIRE
     LOG_INFO("Scan for i2c devices");
 #endif

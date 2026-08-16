@@ -31,6 +31,16 @@ extern void drawCommonHeader(OLEDDisplay *display, int16_t x, int16_t y, const c
                              bool show_date);
 }
 
+PowerTelemetryModule *powerTelemetryModule;
+
+PowerTelemetryModule::~PowerTelemetryModule()
+{
+    if (lastMeasurementPacket) {
+        packetPool.release(lastMeasurementPacket);
+        lastMeasurementPacket = nullptr;
+    }
+}
+
 int32_t PowerTelemetryModule::runOnce()
 {
     if (sleepOnNextExecution == true) {

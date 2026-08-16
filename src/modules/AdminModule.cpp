@@ -1076,19 +1076,21 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_telemetry_tag: {
         LOG_INFO("Set module config: Telemetry");
-        // The *_enabled / *_screen_enabled flags decide in setupModules() whether a telemetry module
-        // is constructed at all, and the modules that are always constructed park themselves for good
-        // when their flags are off (HealthTelemetryModule::runOnce() returns disable()), so a thread
-        // that was switched off cannot notice being switched back on. Those flags still need a reboot.
-        // The intervals and the Fahrenheit display flag are re-read on every run, so they apply live.
+        // Environment, air-quality and power flags reconcile live: module instances are created and
+        // destroyed by the deferred reconcile, and sensor discovery re-fires from the retained boot
+        // scan results. Health still reboots - it is constructed on sensor presence, not config, and
+        // parks itself for good when its flags are off (separate fix). Intervals and the Fahrenheit
+        // flag are re-read on every run.
         const auto &t = c.payload_variant.telemetry;
-        if (moduleConfig.telemetry.environment_measurement_enabled == t.environment_measurement_enabled &&
-            moduleConfig.telemetry.environment_screen_enabled == t.environment_screen_enabled &&
-            moduleConfig.telemetry.air_quality_enabled == t.air_quality_enabled &&
-            moduleConfig.telemetry.air_quality_screen_enabled == t.air_quality_screen_enabled &&
-            moduleConfig.telemetry.power_measurement_enabled == t.power_measurement_enabled &&
-            moduleConfig.telemetry.power_screen_enabled == t.power_screen_enabled &&
-            moduleConfig.telemetry.health_measurement_enabled == t.health_measurement_enabled &&
+        if (moduleConfig.telemetry.environment_measurement_enabled != t.environment_measurement_enabled ||
+            moduleConfig.telemetry.environment_screen_enabled != t.environment_screen_enabled ||
+            moduleConfig.telemetry.air_quality_enabled != t.air_quality_enabled ||
+            moduleConfig.telemetry.air_quality_screen_enabled != t.air_quality_screen_enabled ||
+            moduleConfig.telemetry.power_measurement_enabled != t.power_measurement_enabled ||
+            moduleConfig.telemetry.power_screen_enabled != t.power_screen_enabled) {
+            requestModuleReconcile();
+        }
+        if (moduleConfig.telemetry.health_measurement_enabled == t.health_measurement_enabled &&
             moduleConfig.telemetry.health_screen_enabled == t.health_screen_enabled) {
             shouldReboot = false;
         }
