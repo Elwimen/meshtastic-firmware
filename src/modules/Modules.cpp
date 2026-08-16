@@ -107,6 +107,15 @@
 /**
  * Create module instances here.  If you are adding a new module, you must 'new' it here (or somewhere else)
  */
+// Construction conditions shared between setupModules() and reconcileModules(), so what boot
+// decides and what a live config change decides cannot drift apart.
+#if !MESHTASTIC_EXCLUDE_NEIGHBORINFO
+static bool wantNeighborInfoModule()
+{
+    return moduleConfig.has_neighbor_info && moduleConfig.neighbor_info.enabled;
+}
+#endif
+
 void setupModules()
 {
 #if (HAS_BUTTON || ARCH_PORTDUINO) && !MESHTASTIC_EXCLUDE_INPUTBROKER
@@ -139,7 +148,7 @@ void setupModules()
     traceRouteModule = new TraceRouteModule();
 #endif
 #if !MESHTASTIC_EXCLUDE_NEIGHBORINFO
-    if (moduleConfig.has_neighbor_info && moduleConfig.neighbor_info.enabled) {
+    if (wantNeighborInfoModule()) {
         neighborInfoModule = new NeighborInfoModule();
     }
 #endif
@@ -273,10 +282,22 @@ void reconcileModules()
     bool changed = false;
 
     // One block per convertible module, added as each is taught to tear down cleanly.
-    // Pattern:
-    //   bool want = <same condition setupModules() uses>;
-    //   if (want && !fooModule) { fooModule = new FooModule(); changed = true; }
-    //   if (!want && fooModule) { delete fooModule; fooModule = nullptr; changed = true; }
+
+#if !MESHTASTIC_EXCLUDE_NEIGHBORINFO
+    // Safe to create/destroy live: registrations (module vector, thread controller, nodeStatus
+    // observer) all clean up in destructors, and the single external consumer (NodeDB.cpp
+    // resetNeighbors call) already null-checks the global.
+    if (wantNeighborInfoModule() && !neighborInfoModule) {
+        LOG_INFO("Enable NeighborInfoModule");
+        neighborInfoModule = new NeighborInfoModule();
+        changed = true;
+    } else if (!wantNeighborInfoModule() && neighborInfoModule) {
+        LOG_INFO("Disable NeighborInfoModule");
+        delete neighborInfoModule;
+        neighborInfoModule = nullptr;
+        changed = true;
+    }
+#endif
 
     if (changed) {
         LOG_INFO("Module set reconciled with config");

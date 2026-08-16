@@ -7,6 +7,7 @@
 #include "SPILock.h"
 #include "input/InputBroker.h"
 #include "meshUtils.h"
+#include "modules/Modules.h"
 #include <FSCommon.h>
 #include <ctype.h> // for better whitespace handling
 #if defined(ARCH_ESP32) && !MESHTASTIC_EXCLUDE_WIFI
@@ -1131,12 +1132,13 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_neighbor_info_tag:
         LOG_INFO("Set module config: Neighbor Info");
-        // enabled gates the module's construction in setupModules(). update_interval is re-read by
-        // getIntervalMs() on every reschedule and transmit_over_lora at NeighborInfoModule.cpp:127,
-        // so both apply live.
-        if (moduleConfig.neighbor_info.enabled == c.payload_variant.neighbor_info.enabled) {
-            shouldReboot = false;
+        // Fully live. update_interval is re-read by getIntervalMs() on every reschedule and
+        // transmit_over_lora at point of use; an enabled change is handled by the deferred module
+        // reconcile, which constructs or tears down the module instance outside packet dispatch.
+        if (moduleConfig.neighbor_info.enabled != c.payload_variant.neighbor_info.enabled) {
+            requestModuleReconcile();
         }
+        shouldReboot = false;
         moduleConfig.has_neighbor_info = true;
         moduleConfig.neighbor_info = c.payload_variant.neighbor_info;
         if (moduleConfig.neighbor_info.update_interval < min_neighbor_info_broadcast_secs) {
