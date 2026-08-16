@@ -307,56 +307,82 @@ ExternalNotificationModule::ExternalNotificationModule()
     // moduleConfig.external_notification.alert_message_buzzer = true;
 
     if (moduleConfig.external_notification.enabled) {
-#if !defined(MESHTASTIC_EXCLUDE_INPUTBROKER)
-        if (inputBroker) // put our callback in the inputObserver list
-            inputObserver.observe(inputBroker);
-#endif
-        if (nodeDB->loadProto(rtttlConfigFile, meshtastic_RTTTLConfig_size, sizeof(meshtastic_RTTTLConfig),
-                              &meshtastic_RTTTLConfig_msg, &rtttlConfig) != LoadFileResult::LOAD_SUCCESS) {
-            memset(rtttlConfig.ringtone, 0, sizeof(rtttlConfig.ringtone));
-            // The default ringtone is always loaded from userPrefs.jsonc
-            strncpy(rtttlConfig.ringtone, USERPREFS_RINGTONE_RTTTL, sizeof(rtttlConfig.ringtone));
-        }
-
-        LOG_INFO("Init External Notification Module");
-
-        output = moduleConfig.external_notification.output ? moduleConfig.external_notification.output
-                                                           : EXT_NOTIFICATION_MODULE_OUTPUT;
-
-        // Set the direction of a pin
-        if (output > 0) {
-            LOG_INFO("Use Pin %i in digital mode", output);
-            pinMode(output, OUTPUT);
-        }
-#ifdef NEOPIXEL_STATUS_NOTIFICATION_PIN
-        LOG_INFO("Use WS2812 on GPIO %d as notification LED", NEOPIXEL_STATUS_NOTIFICATION_PIN);
-        notificationPixel.begin();
-        notificationPixel.clear();
-        notificationPixel.show();
-#endif
-        setExternalState(0, false);
-        externalTurnedOn[0] = 0;
-        if (moduleConfig.external_notification.output_vibra) {
-            LOG_INFO("Use Pin %i for vibra motor", moduleConfig.external_notification.output_vibra);
-            pinMode(moduleConfig.external_notification.output_vibra, OUTPUT);
-            setExternalState(1, false);
-            externalTurnedOn[1] = 0;
-        }
-        if (moduleConfig.external_notification.output_buzzer && canBuzz()) {
-            if (!moduleConfig.external_notification.use_pwm) {
-                LOG_INFO("Use Pin %i for buzzer", moduleConfig.external_notification.output_buzzer);
-                pinMode(moduleConfig.external_notification.output_buzzer, OUTPUT);
-                setExternalState(2, false);
-                externalTurnedOn[2] = 0;
-            } else {
-                config.device.buzzer_gpio = config.device.buzzer_gpio ? config.device.buzzer_gpio : PIN_BUZZER;
-                // in PWM Mode we force the buzzer pin if it is set
-                LOG_INFO("Use Pin %i in PWM mode", config.device.buzzer_gpio);
-            }
-        }
+        setupOutputs();
     } else {
         LOG_INFO("External Notification Module Disabled");
         disable();
+    }
+}
+
+void ExternalNotificationModule::setupOutputs()
+{
+    // Runs once. Guards the inputBroker observer registration and pin claims against a second
+    // pass when the module is enabled at runtime after booting disabled.
+    if (outputsConfigured)
+        return;
+    outputsConfigured = true;
+
+#if !defined(MESHTASTIC_EXCLUDE_INPUTBROKER)
+    if (inputBroker) // put our callback in the inputObserver list
+        inputObserver.observe(inputBroker);
+#endif
+    if (nodeDB->loadProto(rtttlConfigFile, meshtastic_RTTTLConfig_size, sizeof(meshtastic_RTTTLConfig),
+                          &meshtastic_RTTTLConfig_msg, &rtttlConfig) != LoadFileResult::LOAD_SUCCESS) {
+        memset(rtttlConfig.ringtone, 0, sizeof(rtttlConfig.ringtone));
+        // The default ringtone is always loaded from userPrefs.jsonc
+        strncpy(rtttlConfig.ringtone, USERPREFS_RINGTONE_RTTTL, sizeof(rtttlConfig.ringtone));
+    }
+
+    LOG_INFO("Init External Notification Module");
+
+    output =
+        moduleConfig.external_notification.output ? moduleConfig.external_notification.output : EXT_NOTIFICATION_MODULE_OUTPUT;
+
+    // Set the direction of a pin
+    if (output > 0) {
+        LOG_INFO("Use Pin %i in digital mode", output);
+        pinMode(output, OUTPUT);
+    }
+#ifdef NEOPIXEL_STATUS_NOTIFICATION_PIN
+    LOG_INFO("Use WS2812 on GPIO %d as notification LED", NEOPIXEL_STATUS_NOTIFICATION_PIN);
+    notificationPixel.begin();
+    notificationPixel.clear();
+    notificationPixel.show();
+#endif
+    setExternalState(0, false);
+    externalTurnedOn[0] = 0;
+    if (moduleConfig.external_notification.output_vibra) {
+        LOG_INFO("Use Pin %i for vibra motor", moduleConfig.external_notification.output_vibra);
+        pinMode(moduleConfig.external_notification.output_vibra, OUTPUT);
+        setExternalState(1, false);
+        externalTurnedOn[1] = 0;
+    }
+    if (moduleConfig.external_notification.output_buzzer && canBuzz()) {
+        if (!moduleConfig.external_notification.use_pwm) {
+            LOG_INFO("Use Pin %i for buzzer", moduleConfig.external_notification.output_buzzer);
+            pinMode(moduleConfig.external_notification.output_buzzer, OUTPUT);
+            setExternalState(2, false);
+            externalTurnedOn[2] = 0;
+        } else {
+            config.device.buzzer_gpio = config.device.buzzer_gpio ? config.device.buzzer_gpio : PIN_BUZZER;
+            // in PWM Mode we force the buzzer pin if it is set
+            LOG_INFO("Use Pin %i in PWM mode", config.device.buzzer_gpio);
+        }
+    }
+}
+
+void ExternalNotificationModule::handleConfigChanged()
+{
+    if (moduleConfig.external_notification.enabled) {
+        setupOutputs();         // no-op if the pins were already claimed
+        enabled = true;         // undo a boot-time disable()
+        setIntervalFromNow(25); // wake the thread so output/nag timing runs
+        LOG_INFO("External notification enabled live");
+    } else {
+        // handleReceived() already ignores packets while disabled; this clears anything latched -
+        // an active output, a running ringtone, a pending nag.
+        stopNow();
+        LOG_INFO("External notification disabled live");
     }
 }
 

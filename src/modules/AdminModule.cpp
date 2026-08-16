@@ -8,6 +8,9 @@
 #include "input/InputBroker.h"
 #include "meshUtils.h"
 #include "modules/Modules.h"
+#if !MESHTASTIC_EXCLUDE_EXTERNALNOTIFICATION
+#include "modules/ExternalNotificationModule.h"
+#endif
 #include <FSCommon.h>
 #include <ctype.h> // for better whitespace handling
 #if defined(ARCH_ESP32) && !MESHTASTIC_EXCLUDE_WIFI
@@ -1035,20 +1038,34 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_external_notification_tag:
         LOG_INFO("Set module config: External Notification");
-        // The module is always constructed, but its setup() only claims the output pins when enabled
-        // was set at boot, and those pinMode() calls capture output/output_vibra/output_buzzer plus
-        // the PWM and I2S buzzer choices. Everything else - the alert_* routing flags, output_ms,
-        // nag_timeout and the active polarity - is consulted when a notification actually fires.
-        if (moduleConfig.external_notification.enabled == c.payload_variant.external_notification.enabled &&
-            moduleConfig.external_notification.output == c.payload_variant.external_notification.output &&
-            moduleConfig.external_notification.output_vibra == c.payload_variant.external_notification.output_vibra &&
-            moduleConfig.external_notification.output_buzzer == c.payload_variant.external_notification.output_buzzer &&
-            moduleConfig.external_notification.use_pwm == c.payload_variant.external_notification.use_pwm &&
-            moduleConfig.external_notification.use_i2s_as_buzzer == c.payload_variant.external_notification.use_i2s_as_buzzer) {
-            shouldReboot = false;
+        // An enabled change is applied by nudging the module directly below - it is always
+        // constructed, so there is no lifecycle to manage, just pins to claim and a thread to wake
+        // (or latched outputs to clear). The output-shape fields still reboot, but only while the
+        // module stays enabled; a same-write enable flip claims the new pins fresh. The alert_*
+        // routing flags, output_ms, nag_timeout and active polarity are read when a notification
+        // fires.
+        {
+            bool extNotifEnabledChanged =
+                moduleConfig.external_notification.enabled != c.payload_variant.external_notification.enabled;
+            if (extNotifEnabledChanged) {
+                shouldReboot = false;
+            } else if (!moduleConfig.external_notification.enabled ||
+                       (moduleConfig.external_notification.output == c.payload_variant.external_notification.output &&
+                        moduleConfig.external_notification.output_vibra == c.payload_variant.external_notification.output_vibra &&
+                        moduleConfig.external_notification.output_buzzer ==
+                            c.payload_variant.external_notification.output_buzzer &&
+                        moduleConfig.external_notification.use_pwm == c.payload_variant.external_notification.use_pwm &&
+                        moduleConfig.external_notification.use_i2s_as_buzzer ==
+                            c.payload_variant.external_notification.use_i2s_as_buzzer)) {
+                shouldReboot = false;
+            }
+            moduleConfig.has_external_notification = true;
+            moduleConfig.external_notification = c.payload_variant.external_notification;
+#if !MESHTASTIC_EXCLUDE_EXTERNALNOTIFICATION
+            if (extNotifEnabledChanged && externalNotificationModule)
+                externalNotificationModule->handleConfigChanged();
+#endif
         }
-        moduleConfig.has_external_notification = true;
-        moduleConfig.external_notification = c.payload_variant.external_notification;
         break;
     case meshtastic_ModuleConfig_store_forward_tag:
         LOG_INFO("Set module config: Store & Forward");
