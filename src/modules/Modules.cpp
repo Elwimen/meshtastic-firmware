@@ -143,6 +143,13 @@ static bool wantSerialModule()
 }
 #endif
 
+#if defined(ARCH_ESP32) && !MESHTASTIC_EXCLUDE_PAXCOUNTER
+static bool wantPaxcounterModule()
+{
+    return moduleConfig.has_paxcounter && moduleConfig.paxcounter.enabled;
+}
+#endif
+
 #if (defined(ARCH_ESP32) || defined(ARCH_PORTDUINO)) && !MESHTASTIC_EXCLUDE_STOREFORWARD
 static bool wantStoreForwardModule()
 {
@@ -288,7 +295,7 @@ void setupModules()
     audioModule = new AudioModule();
 #endif
 #if !MESHTASTIC_EXCLUDE_PAXCOUNTER
-    if (moduleConfig.has_paxcounter && moduleConfig.paxcounter.enabled) {
+    if (wantPaxcounterModule()) {
         paxcounterModule = new PaxcounterModule();
     }
 #endif
@@ -393,6 +400,21 @@ void reconcileModules()
         LOG_INFO("Disable NeighborInfoModule");
         delete neighborInfoModule;
         neighborInfoModule = nullptr;
+        changed = true;
+    }
+#endif
+
+#if defined(ARCH_ESP32) && !MESHTASTIC_EXCLUDE_PAXCOUNTER
+    // Teardown stops libpax before the module memory it writes into is freed; the report callback
+    // additionally null-checks the global because it runs on a libpax task.
+    if (wantPaxcounterModule() && !paxcounterModule) {
+        LOG_INFO("Enable PaxcounterModule");
+        paxcounterModule = new PaxcounterModule();
+        changed = true;
+    } else if (!wantPaxcounterModule() && paxcounterModule) {
+        LOG_INFO("Disable PaxcounterModule");
+        delete paxcounterModule;
+        paxcounterModule = nullptr;
         changed = true;
     }
 #endif

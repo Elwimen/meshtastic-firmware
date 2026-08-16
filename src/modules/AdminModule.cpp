@@ -1223,12 +1223,16 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_paxcounter_tag:
         LOG_INFO("Set module config: Paxcounter");
-        // enabled gates construction in setupModules(), and the two RSSI thresholds are copied into
-        // the libpax configuration struct during PaxcounterModule setup. Only the update interval is
-        // re-read on each run, so that is the one field that applies live.
-        if (moduleConfig.paxcounter.enabled == c.payload_variant.paxcounter.enabled &&
-            moduleConfig.paxcounter.wifi_threshold == c.payload_variant.paxcounter.wifi_threshold &&
-            moduleConfig.paxcounter.ble_threshold == c.payload_variant.paxcounter.ble_threshold) {
+        // An enabled change goes through the deferred module reconcile: teardown stops libpax, a
+        // fresh construction re-inits it from the new config. The RSSI thresholds still reboot
+        // while the module keeps running (copied into the libpax config at init); the update
+        // interval is re-read each run.
+        if (moduleConfig.paxcounter.enabled != c.payload_variant.paxcounter.enabled) {
+            requestModuleReconcile();
+            shouldReboot = false;
+        } else if (!moduleConfig.paxcounter.enabled ||
+                   (moduleConfig.paxcounter.wifi_threshold == c.payload_variant.paxcounter.wifi_threshold &&
+                    moduleConfig.paxcounter.ble_threshold == c.payload_variant.paxcounter.ble_threshold)) {
             shouldReboot = false;
         }
         moduleConfig.has_paxcounter = true;
