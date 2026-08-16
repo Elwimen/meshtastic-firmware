@@ -288,6 +288,13 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
     void completeSending();
 
     /**
+     * Retire any in-flight transmit, then apply the new modem config.
+     *
+     * Subclass reconfigure() implementations call into this before touching the radio.
+     */
+    virtual bool reconfigure() override;
+
+    /**
      * Add SNR data to received messages
      */
     virtual void addReceiveMetadata(meshtastic_MeshPacket *mp) = 0;
