@@ -1105,11 +1105,10 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_telemetry_tag: {
         LOG_INFO("Set module config: Telemetry");
-        // Environment, air-quality and power flags reconcile live: module instances are created and
-        // destroyed by the deferred reconcile, and sensor discovery re-fires from the retained boot
-        // scan results. Health still reboots - it is constructed on sensor presence, not config, and
-        // parks itself for good when its flags are off (separate fix). Intervals and the Fahrenheit
-        // flag are re-read on every run.
+        // Fully live. Environment, air-quality and power flags reconcile module instances (with
+        // sensor discovery re-fired from the retained boot scan results). Health is constructed on
+        // sensor presence rather than config, so a flag enable just wakes its parked thread.
+        // Intervals and the Fahrenheit flag are re-read on every run.
         const auto &t = c.payload_variant.telemetry;
         if (moduleConfig.telemetry.environment_measurement_enabled != t.environment_measurement_enabled ||
             moduleConfig.telemetry.environment_screen_enabled != t.environment_screen_enabled ||
@@ -1119,12 +1118,20 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
             moduleConfig.telemetry.power_screen_enabled != t.power_screen_enabled) {
             requestModuleReconcile();
         }
-        if (moduleConfig.telemetry.health_measurement_enabled == t.health_measurement_enabled &&
-            moduleConfig.telemetry.health_screen_enabled == t.health_screen_enabled) {
-            shouldReboot = false;
+        {
+            bool healthChanged = moduleConfig.telemetry.health_measurement_enabled != t.health_measurement_enabled ||
+                                 moduleConfig.telemetry.health_screen_enabled != t.health_screen_enabled;
+            moduleConfig.has_telemetry = true;
+            moduleConfig.telemetry = t;
+#if HAS_TELEMETRY && HAS_SENSOR && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR && !MESHTASTIC_EXCLUDE_HEALTH_TELEMETRY &&           \
+    !defined(ARCH_PORTDUINO)
+            if (healthChanged && healthTelemetryModule)
+                healthTelemetryModule->handleConfigChanged();
+#else
+            (void)healthChanged;
+#endif
         }
-        moduleConfig.has_telemetry = true;
-        moduleConfig.telemetry = t;
+        shouldReboot = false;
         break;
     }
     case meshtastic_ModuleConfig_canned_message_tag:

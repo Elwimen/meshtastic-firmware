@@ -265,7 +265,7 @@ void setupModules()
 #if !MESHTASTIC_EXCLUDE_HEALTH_TELEMETRY
     if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_MAX30102].first > 0 ||
         nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_MLX90614].first > 0) {
-        new HealthTelemetryModule();
+        healthTelemetryModule = new HealthTelemetryModule();
     }
 #endif
 #endif
