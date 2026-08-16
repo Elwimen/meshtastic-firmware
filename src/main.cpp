@@ -224,6 +224,9 @@ bool pmu_found;
 #if !MESHTASTIC_EXCLUDE_I2C
 // Array map of sensor types with i2c address and wire as we'll find in the i2c scan
 std::pair<uint8_t, TwoWire *> nodeTelemetrySensorsMap[_meshtastic_TelemetrySensorType_MAX + 1] = {};
+// Boot I2C scan results. Deliberately outlives setup() so reconcileModules() can re-run sensor
+// discovery for telemetry modules that are enabled at runtime.
+std::unique_ptr<ScanI2CTwoWire> i2cScanner;
 #endif
 
 Router *router = NULL; // Users of router don't care what sort of subclass implements that API
@@ -251,7 +254,7 @@ const char *getDeviceName()
 uint32_t timeLastPowered = 0;
 
 static OSThread *powerFSMthread;
-OSThread *ambientLightingThread;
+AmbientLightingThread *ambientLightingThread;
 
 RadioLibHal *RadioLibHAL = NULL;
 
@@ -533,7 +536,9 @@ void setup()
 #if !MESHTASTIC_EXCLUDE_I2C
     // We need to scan here to decide if we have a screen for nodeDB.init() and because power has been applied to
     // accessories
-    auto i2cScanner = std::unique_ptr<ScanI2CTwoWire>(new ScanI2CTwoWire());
+    // Deliberately outlives setup() (global below): live-enabled telemetry modules re-run sensor
+    // discovery against these scan results from reconcileModules().
+    i2cScanner = std::unique_ptr<ScanI2CTwoWire>(new ScanI2CTwoWire());
 #if HAS_WIRE
     LOG_INFO("Scan for i2c devices");
 #endif
@@ -1181,6 +1186,11 @@ void loop()
 #endif
 
     service->loop();
+
+    // Safe point for module lifecycle changes: packet dispatch (callModules) has fully unwound,
+    // so modules requested on/off by an admin config write can be constructed/destroyed here.
+    reconcileModules();
+
 #if !MESHTASTIC_EXCLUDE_INPUTBROKER && defined(HAS_FREE_RTOS) && !defined(ARCH_RP2040)
     if (inputBroker)
         inputBroker->processInputEventQueue();

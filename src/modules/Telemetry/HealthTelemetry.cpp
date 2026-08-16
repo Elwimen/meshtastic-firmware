@@ -36,6 +36,8 @@ MLX90614Sensor mlx90614Sensor;
 
 static constexpr uint16_t TX_HISTORY_KEY_HEALTH_TELEMETRY = 0x8003;
 
+HealthTelemetryModule *healthTelemetryModule;
+
 int32_t HealthTelemetryModule::runOnce()
 {
     if (sleepOnNextExecution == true) {

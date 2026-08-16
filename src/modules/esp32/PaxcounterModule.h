@@ -21,6 +21,9 @@ class PaxcounterModule : private concurrency::OSThread, public ProtobufModule<me
   public:
     PaxcounterModule();
 
+    /** Stops libpax (sniffers, report timer) before the member it writes into is freed. */
+    ~PaxcounterModule();
+
   protected:
     struct count_payload_t count_from_libpax = {0, 0, 0};
     virtual int32_t runOnce() override;

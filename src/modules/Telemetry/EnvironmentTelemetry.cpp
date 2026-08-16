@@ -148,11 +148,30 @@ extern void drawCommonHeader(OLEDDisplay *display, int16_t x, int16_t y, const c
 
 static constexpr uint16_t TX_HISTORY_KEY_ENVIRONMENT_TELEMETRY = 0x8002;
 
+EnvironmentTelemetryModule *environmentTelemetryModule;
+
+EnvironmentTelemetryModule::~EnvironmentTelemetryModule()
+{
+    if (lastMeasurementPacket) {
+        packetPool.release(lastMeasurementPacket);
+        lastMeasurementPacket = nullptr;
+    }
+}
+
 void EnvironmentTelemetryModule::i2cScanFinished(ScanI2C *i2cScanner)
 {
     if (!moduleConfig.telemetry.environment_measurement_enabled && !ENVIRONMENTAL_TELEMETRY_MODULE_ENABLE) {
         return;
     }
+    // Discovery may now be re-fired from reconcileModules() when the module is (re)created at
+    // runtime. The sensor objects live in this file's static list and survive module deletion,
+    // so discovery must only ever run once per boot or every sensor would be constructed and
+    // I2C-initialised a second time.
+    static bool sensorsAdded = false;
+    if (sensorsAdded)
+        return;
+    sensorsAdded = true;
+
     LOG_INFO("Environment Telemetry adding I2C devices...");
 
     // order by priority of metrics/values (low top, high bottom)

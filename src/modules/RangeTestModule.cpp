@@ -27,6 +27,17 @@ RangeTestModuleRadio *rangeTestModuleRadio;
 
 RangeTestModule::RangeTestModule() : concurrency::OSThread("RangeTest") {}
 
+RangeTestModule::~RangeTestModule()
+{
+    // The radio companion is created lazily on our first run; it registers itself as a
+    // MeshModule, whose destructor deregisters it again. The saved rangetest.csv is left alone -
+    // disabling the module should not discard collected data.
+    if (rangeTestModuleRadio) {
+        delete rangeTestModuleRadio;
+        rangeTestModuleRadio = nullptr;
+    }
+}
+
 uint32_t packetSequence = 0;
 
 int32_t RangeTestModule::runOnce()

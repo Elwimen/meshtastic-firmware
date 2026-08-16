@@ -83,6 +83,20 @@ SerialModule::SerialModule() : StreamAPI(&SERIAL_PRINT_OBJECT), concurrency::OST
 }
 static Print *serialPrint = &SERIAL_PRINT_OBJECT;
 
+SerialModule::~SerialModule()
+{
+    // The radio companion registers itself as a MeshModule; its destructor deregisters it.
+    if (serialModuleRadio) {
+        delete serialModuleRadio;
+        serialModuleRadio = nullptr;
+    }
+    // Only a dedicated UART is released. In override-console mode the console port was re-begun
+    // at the module's baud; ending it would take the debug console down with us, so it stays.
+    if (claimedUart)
+        claimedUart->end();
+    serialPrint = &SERIAL_PRINT_OBJECT;
+}
+
 char serialBytes[512];
 size_t serialPayloadSize;
 
@@ -177,6 +191,7 @@ int32_t SerialModule::runOnce()
             if (moduleConfig.serial.rxd && moduleConfig.serial.txd) {
                 Serial1.setRxBufferSize(RX_BUFFER);
                 Serial1.begin(baud, SERIAL_8N1, moduleConfig.serial.rxd, moduleConfig.serial.txd);
+                claimedUart = &Serial1;
             } else {
                 Serial.begin(baud);
                 Serial.setTimeout(moduleConfig.serial.timeout > 0 ? moduleConfig.serial.timeout : TIMEOUT);
@@ -193,11 +208,13 @@ int32_t SerialModule::runOnce()
             }
             serialInstance->begin(baud);
             serialInstance->setTimeout(moduleConfig.serial.timeout > 0 ? moduleConfig.serial.timeout : TIMEOUT);
+            claimedUart = serialInstance;
 #elif defined(ARCH_ESP32)
 
             if (moduleConfig.serial.rxd && moduleConfig.serial.txd) {
                 Serial2.setRxBufferSize(RX_BUFFER);
                 Serial2.begin(baud, SERIAL_8N1, moduleConfig.serial.rxd, moduleConfig.serial.txd);
+                claimedUart = &Serial2;
             } else {
                 Serial.begin(baud);
                 Serial.setTimeout(moduleConfig.serial.timeout > 0 ? moduleConfig.serial.timeout : TIMEOUT);
@@ -213,6 +230,7 @@ int32_t SerialModule::runOnce()
 #endif
                 Serial2.begin(baud, SERIAL_8N1);
                 Serial2.setTimeout(moduleConfig.serial.timeout > 0 ? moduleConfig.serial.timeout : TIMEOUT);
+                claimedUart = &Serial2;
             } else {
 #ifdef RP2040_SLOW_CLOCK
                 Serial2.begin(baud, SERIAL_8N1);

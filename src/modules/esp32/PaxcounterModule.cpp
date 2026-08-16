@@ -17,11 +17,26 @@ PaxcounterModule *paxcounterModule;
  */
 void PaxcounterModule::handlePaxCounterReportRequest()
 {
+    // Belt to the destructor's stop-first ordering: this runs on a libpax task, so if the module
+    // is being torn down the global may already be null.
+    if (!paxcounterModule)
+        return;
     // The libpax library already updated our data structure, just before invoking this callback.
     LOG_INFO("PaxcounterModule: libpax reported new data: wifi=%d; ble=%d; uptime=%lu",
              paxcounterModule->count_from_libpax.wifi_count, paxcounterModule->count_from_libpax.ble_count, millis() / 1000);
     paxcounterModule->reportedDataSent = false;
     paxcounterModule->setIntervalFromNow(0);
+}
+
+PaxcounterModule::~PaxcounterModule()
+{
+    // libpax holds a pointer to count_from_libpax (a member) and a callback that runs on its own
+    // task, so the sniffers and report timer MUST be stopped before this object goes away. Only
+    // needed if runOnce() actually initialised the library.
+    if (!firstTime) {
+        libpax_counter_stop();
+        LOG_INFO("Paxcounter stopped");
+    }
 }
 
 PaxcounterModule::PaxcounterModule()

@@ -20,6 +20,14 @@ class SerialModule : public StreamAPI, private concurrency::OSThread
   public:
     SerialModule();
 
+    /**
+     * Tears down the SerialModuleRadio companion created lazily on first run, releases the
+     * dedicated UART if one was claimed, and restores the serialPrint target. When the module
+     * overrode the console serial port, the console is deliberately left running (at the
+     * module's baud rate, until the next reboot) - ending it would kill the debug console.
+     */
+    ~SerialModule();
+
     static bool isValidConfig(const meshtastic_ModuleConfig_SerialConfig &config);
 
   protected:
@@ -29,6 +37,7 @@ class SerialModule : public StreamAPI, private concurrency::OSThread
     virtual bool checkIsConnected() override;
 
   private:
+    HardwareSerial *claimedUart = nullptr; // dedicated UART begun at setup; null = console or none
     uint32_t getBaudRate();
     void sendTelemetry(meshtastic_Telemetry m);
     void processWXSerial();

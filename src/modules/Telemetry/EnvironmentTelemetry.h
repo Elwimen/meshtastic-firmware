@@ -35,6 +35,8 @@ class EnvironmentTelemetryModule : private concurrency::OSThread,
         nodeStatusObserver.observe(&nodeStatus->onNewStatus);
         setIntervalFromNow(10 * 1000);
     }
+    /** Releases the pool packet held for the UI frame; everything else cleans up in base dtors. */
+    ~EnvironmentTelemetryModule();
     virtual bool wantUIFrame() override;
 #if !HAS_SCREEN
     void drawFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y);
@@ -72,3 +74,5 @@ class EnvironmentTelemetryModule : private concurrency::OSThread,
 };
 
 #endif
+
+extern EnvironmentTelemetryModule *environmentTelemetryModule;

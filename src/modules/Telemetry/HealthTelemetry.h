@@ -18,6 +18,19 @@ class HealthTelemetryModule : private concurrency::OSThread,
         CallbackObserver<HealthTelemetryModule, const meshtastic::Status *>(this, &HealthTelemetryModule::handleStatusUpdate);
 
   public:
+    /**
+     * Wake the thread after a live health-flag enable: runOnce() parks via disable() when both
+     * flags are off and cannot notice them turning back on. Disable needs no action - the next
+     * runOnce() sees the flags and parks itself again.
+     */
+    void handleConfigChanged()
+    {
+        if (moduleConfig.telemetry.health_measurement_enabled || moduleConfig.telemetry.health_screen_enabled) {
+            enabled = true;
+            setIntervalFromNow(25);
+        }
+    }
+
     HealthTelemetryModule()
         : concurrency::OSThread("HealthTelemetry"),
           ProtobufModule("HealthTelemetry", meshtastic_PortNum_TELEMETRY_APP, &meshtastic_Telemetry_msg)
@@ -58,5 +71,7 @@ class HealthTelemetryModule : private concurrency::OSThread,
     uint32_t lastSentToPhone = 0;
     uint32_t sensor_read_error_count = 0;
 };
+
+extern HealthTelemetryModule *healthTelemetryModule;
 
 #endif

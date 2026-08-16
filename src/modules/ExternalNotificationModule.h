@@ -7,7 +7,6 @@
 
 #ifdef HAS_RGB_LED
 #include "AmbientLightingThread.h"
-extern AmbientLightingThread *ambientLightingThread;
 #endif
 
 // Drive a single WS2812 as the notification LED (M1/M2-style LED_NOTIFICATION
@@ -63,6 +62,13 @@ class ExternalNotificationModule : public SinglePortModule, private concurrency:
     uint32_t nagCycleCutoff = 1;
 
     void setExternalState(uint8_t index = 0, bool on = false);
+
+    /**
+     * Apply a live config change: claims the outputs and wakes the thread on enable (the module
+     * is always constructed but only sets its pins up when enabled), clears latched outputs and
+     * stops nagging on disable. Safe to call from packet dispatch - it only mutates this module.
+     */
+    void handleConfigChanged();
     bool getExternal(uint8_t index = 0);
 
     void setMute(bool mute) { isSilenced = mute; }
@@ -73,6 +79,11 @@ class ExternalNotificationModule : public SinglePortModule, private concurrency:
 
     void stopNow();
 
+  private:
+    void setupOutputs();
+    bool outputsConfigured = false;
+
+  public:
     void handleGetRingtone(const meshtastic_MeshPacket &req, meshtastic_AdminMessage *response);
     void handleSetRingtone(const char *from_msg);
 

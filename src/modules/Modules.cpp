@@ -55,10 +55,14 @@
 #include "modules/Telemetry/DeviceTelemetry.h"
 #endif
 #if HAS_SENSOR && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
+#include "detect/ScanI2CConsumer.h"
+#include "detect/ScanI2CTwoWire.h"
 #include "main.h"
 #include "modules/Telemetry/EnvironmentTelemetry.h"
 #include "modules/Telemetry/HealthTelemetry.h"
 #include "modules/Telemetry/Sensor/TelemetrySensor.h"
+#include <memory>
+extern std::unique_ptr<ScanI2CTwoWire> i2cScanner;
 #endif
 #if HAS_SENSOR && !MESHTASTIC_EXCLUDE_AIR_QUALITY_SENSOR
 #include "main.h"
@@ -107,6 +111,74 @@
 /**
  * Create module instances here.  If you are adding a new module, you must 'new' it here (or somewhere else)
  */
+// Construction conditions shared between setupModules() and reconcileModules(), so what boot
+// decides and what a live config change decides cannot drift apart.
+#if !MESHTASTIC_EXCLUDE_NEIGHBORINFO
+static bool wantNeighborInfoModule()
+{
+    return moduleConfig.has_neighbor_info && moduleConfig.neighbor_info.enabled;
+}
+#endif
+
+#if !MESHTASTIC_EXCLUDE_DETECTIONSENSOR
+static bool wantDetectionSensorModule()
+{
+    return moduleConfig.has_detection_sensor && moduleConfig.detection_sensor.enabled;
+}
+#endif
+
+#if !MESHTASTIC_EXCLUDE_RANGETEST && !MESHTASTIC_EXCLUDE_GPS
+static bool wantRangeTestModule()
+{
+    return moduleConfig.has_range_test && moduleConfig.range_test.enabled;
+}
+#endif
+
+#if (defined(ARCH_ESP32) || defined(ARCH_NRF52) || defined(ARCH_RP2040) || defined(ARCH_STM32WL)) &&                             \
+    !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3) && !MESHTASTIC_EXCLUDE_SERIAL
+static bool wantSerialModule()
+{
+    return moduleConfig.has_serial && moduleConfig.serial.enabled &&
+           config.display.displaymode != meshtastic_Config_DisplayConfig_DisplayMode_COLOR;
+}
+#endif
+
+#if defined(ARCH_ESP32) && !MESHTASTIC_EXCLUDE_PAXCOUNTER
+static bool wantPaxcounterModule()
+{
+    return moduleConfig.has_paxcounter && moduleConfig.paxcounter.enabled;
+}
+#endif
+
+#if (defined(ARCH_ESP32) || defined(ARCH_PORTDUINO)) && !MESHTASTIC_EXCLUDE_STOREFORWARD
+static bool wantStoreForwardModule()
+{
+    return moduleConfig.has_store_forward && moduleConfig.store_forward.enabled;
+}
+#endif
+
+#if HAS_TELEMETRY && HAS_SENSOR && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
+static bool wantEnvironmentTelemetryModule()
+{
+    return moduleConfig.has_telemetry &&
+           (moduleConfig.telemetry.environment_measurement_enabled || moduleConfig.telemetry.environment_screen_enabled);
+}
+#if HAS_TELEMETRY && HAS_SENSOR && !MESHTASTIC_EXCLUDE_AIR_QUALITY_SENSOR
+static bool wantAirQualityTelemetryModule()
+{
+    return moduleConfig.has_telemetry &&
+           (moduleConfig.telemetry.air_quality_enabled || moduleConfig.telemetry.air_quality_screen_enabled);
+}
+#endif
+#endif
+#if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_POWER_TELEMETRY && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
+static bool wantPowerTelemetryModule()
+{
+    return moduleConfig.has_telemetry &&
+           (moduleConfig.telemetry.power_measurement_enabled || moduleConfig.telemetry.power_screen_enabled);
+}
+#endif
+
 void setupModules()
 {
 #if (HAS_BUTTON || ARCH_PORTDUINO) && !MESHTASTIC_EXCLUDE_INPUTBROKER
@@ -139,12 +211,12 @@ void setupModules()
     traceRouteModule = new TraceRouteModule();
 #endif
 #if !MESHTASTIC_EXCLUDE_NEIGHBORINFO
-    if (moduleConfig.has_neighbor_info && moduleConfig.neighbor_info.enabled) {
+    if (wantNeighborInfoModule()) {
         neighborInfoModule = new NeighborInfoModule();
     }
 #endif
 #if !MESHTASTIC_EXCLUDE_DETECTIONSENSOR
-    if (moduleConfig.has_detection_sensor && moduleConfig.detection_sensor.enabled) {
+    if (wantDetectionSensorModule()) {
         detectionSensorModule = new DetectionSensorModule();
     }
 #endif
@@ -189,35 +261,31 @@ void setupModules()
     new DeviceTelemetryModule();
 #endif
 #if HAS_TELEMETRY && HAS_SENSOR && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
-    if (moduleConfig.has_telemetry &&
-        (moduleConfig.telemetry.environment_measurement_enabled || moduleConfig.telemetry.environment_screen_enabled)) {
-        new EnvironmentTelemetryModule();
+    if (wantEnvironmentTelemetryModule()) {
+        environmentTelemetryModule = new EnvironmentTelemetryModule();
     }
 #if HAS_TELEMETRY && HAS_SENSOR && !MESHTASTIC_EXCLUDE_AIR_QUALITY_SENSOR
-    if (moduleConfig.has_telemetry &&
-        (moduleConfig.telemetry.air_quality_enabled || moduleConfig.telemetry.air_quality_screen_enabled)) {
-        new AirQualityTelemetryModule();
+    if (wantAirQualityTelemetryModule()) {
+        airQualityTelemetryModule = new AirQualityTelemetryModule();
     }
 #endif
 #if !MESHTASTIC_EXCLUDE_HEALTH_TELEMETRY
     if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_MAX30102].first > 0 ||
         nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_MLX90614].first > 0) {
-        new HealthTelemetryModule();
+        healthTelemetryModule = new HealthTelemetryModule();
     }
 #endif
 #endif
 #if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_POWER_TELEMETRY && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
-    if (moduleConfig.has_telemetry &&
-        (moduleConfig.telemetry.power_measurement_enabled || moduleConfig.telemetry.power_screen_enabled)) {
-        new PowerTelemetryModule();
+    if (wantPowerTelemetryModule()) {
+        powerTelemetryModule = new PowerTelemetryModule();
     }
 #endif
 #if (defined(ARCH_ESP32) || defined(ARCH_NRF52) || defined(ARCH_RP2040) || defined(ARCH_STM32WL)) &&                             \
     !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3)
 #if !MESHTASTIC_EXCLUDE_SERIAL
-    if (moduleConfig.has_serial && moduleConfig.serial.enabled &&
-        config.display.displaymode != meshtastic_Config_DisplayConfig_DisplayMode_COLOR) {
-        new SerialModule();
+    if (wantSerialModule()) {
+        serialModule = new SerialModule();
     }
 #endif
 #endif
@@ -227,14 +295,14 @@ void setupModules()
     audioModule = new AudioModule();
 #endif
 #if !MESHTASTIC_EXCLUDE_PAXCOUNTER
-    if (moduleConfig.has_paxcounter && moduleConfig.paxcounter.enabled) {
+    if (wantPaxcounterModule()) {
         paxcounterModule = new PaxcounterModule();
     }
 #endif
 #endif
 #if defined(ARCH_ESP32) || defined(ARCH_PORTDUINO)
 #if !MESHTASTIC_EXCLUDE_STOREFORWARD
-    if (moduleConfig.has_store_forward && moduleConfig.store_forward.enabled) {
+    if (wantStoreForwardModule()) {
         storeForwardModule = new StoreForwardModule();
     }
 #endif
@@ -243,8 +311,8 @@ void setupModules()
     externalNotificationModule = new ExternalNotificationModule();
 #endif
 #if !MESHTASTIC_EXCLUDE_RANGETEST && !MESHTASTIC_EXCLUDE_GPS
-    if (moduleConfig.has_range_test && moduleConfig.range_test.enabled)
-        new RangeTestModule();
+    if (wantRangeTestModule())
+        rangeTestModule = new RangeTestModule();
 #endif
 #if defined(HAS_HARDWARE_WATCHDOG)
     watchdogThread = new WatchdogThread();
@@ -252,4 +320,173 @@ void setupModules()
     // NOTE! This module must be added LAST because it likes to check for replies from other modules and avoid sending extra
     // acks
     routingModule = new RoutingModule();
+}
+
+// Set by requestModuleReconcile(), consumed by reconcileModules(). Both run on the main loop
+// (AdminModule handles packets from service->loop(), reconcileModules() is called right after
+// it), so plain bool is enough - no ISR or second core touches this.
+static bool moduleReconcilePending = false;
+
+void requestModuleReconcile()
+{
+    moduleReconcilePending = true;
+}
+
+void reconcileModules()
+{
+    if (!moduleReconcilePending)
+        return;
+    moduleReconcilePending = false;
+
+    bool changed = false;
+
+    // One block per convertible module, added as each is taught to tear down cleanly.
+
+#if (defined(ARCH_ESP32) || defined(ARCH_NRF52) || defined(ARCH_RP2040) || defined(ARCH_STM32WL)) &&                             \
+    !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3) && !MESHTASTIC_EXCLUDE_SERIAL
+    // The destructor also removes the lazily-created radio companion, releases a dedicated UART
+    // if one was claimed, and restores the serialPrint target. Nothing else references the global.
+    if (wantSerialModule() && !serialModule) {
+        LOG_INFO("Enable SerialModule");
+        serialModule = new SerialModule();
+        changed = true;
+    } else if (!wantSerialModule() && serialModule) {
+        LOG_INFO("Disable SerialModule");
+        delete serialModule;
+        serialModule = nullptr;
+        changed = true;
+    }
+#endif
+
+#if !MESHTASTIC_EXCLUDE_RANGETEST && !MESHTASTIC_EXCLUDE_GPS
+    // The thread's destructor also removes the lazily-created radio companion. Nothing else
+    // references either global.
+    if (wantRangeTestModule() && !rangeTestModule) {
+        LOG_INFO("Enable RangeTestModule");
+        rangeTestModule = new RangeTestModule();
+        changed = true;
+    } else if (!wantRangeTestModule() && rangeTestModule) {
+        LOG_INFO("Disable RangeTestModule");
+        delete rangeTestModule;
+        rangeTestModule = nullptr;
+        changed = true;
+    }
+#endif
+
+#if !MESHTASTIC_EXCLUDE_DETECTIONSENSOR
+    // Hardware is handled by the module's destructor (drops the pullup on the pin it bound,
+    // powers the sensor down); no other code references the global at all.
+    if (wantDetectionSensorModule() && !detectionSensorModule) {
+        LOG_INFO("Enable DetectionSensorModule");
+        detectionSensorModule = new DetectionSensorModule();
+        changed = true;
+    } else if (!wantDetectionSensorModule() && detectionSensorModule) {
+        LOG_INFO("Disable DetectionSensorModule");
+        delete detectionSensorModule;
+        detectionSensorModule = nullptr;
+        changed = true;
+    }
+#endif
+
+#if !MESHTASTIC_EXCLUDE_NEIGHBORINFO
+    // Safe to create/destroy live: registrations (module vector, thread controller, nodeStatus
+    // observer) all clean up in destructors, and the single external consumer (NodeDB.cpp
+    // resetNeighbors call) already null-checks the global.
+    if (wantNeighborInfoModule() && !neighborInfoModule) {
+        LOG_INFO("Enable NeighborInfoModule");
+        neighborInfoModule = new NeighborInfoModule();
+        changed = true;
+    } else if (!wantNeighborInfoModule() && neighborInfoModule) {
+        LOG_INFO("Disable NeighborInfoModule");
+        delete neighborInfoModule;
+        neighborInfoModule = nullptr;
+        changed = true;
+    }
+#endif
+
+#if defined(ARCH_ESP32) && !MESHTASTIC_EXCLUDE_PAXCOUNTER
+    // Teardown stops libpax before the module memory it writes into is freed; the report callback
+    // additionally null-checks the global because it runs on a libpax task.
+    if (wantPaxcounterModule() && !paxcounterModule) {
+        LOG_INFO("Enable PaxcounterModule");
+        paxcounterModule = new PaxcounterModule();
+        changed = true;
+    } else if (!wantPaxcounterModule() && paxcounterModule) {
+        LOG_INFO("Disable PaxcounterModule");
+        delete paxcounterModule;
+        paxcounterModule = nullptr;
+        changed = true;
+    }
+#endif
+
+#if (defined(ARCH_ESP32) || defined(ARCH_PORTDUINO)) && !MESHTASTIC_EXCLUDE_STOREFORWARD
+    // The PSRAM history is a smart pointer and frees on destruction. The two call sites that used
+    // to dereference the global guarded only by the config flag now null-check it as well.
+    if (wantStoreForwardModule() && !storeForwardModule) {
+        LOG_INFO("Enable StoreForwardModule");
+        storeForwardModule = new StoreForwardModule();
+        changed = true;
+    } else if (!wantStoreForwardModule() && storeForwardModule) {
+        LOG_INFO("Disable StoreForwardModule");
+        delete storeForwardModule;
+        storeForwardModule = nullptr;
+        changed = true;
+    }
+#endif
+
+#if HAS_TELEMETRY && HAS_SENSOR && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
+    if (wantEnvironmentTelemetryModule() && !environmentTelemetryModule) {
+        LOG_INFO("Enable EnvironmentTelemetryModule");
+        environmentTelemetryModule = new EnvironmentTelemetryModule();
+        changed = true;
+    } else if (!wantEnvironmentTelemetryModule() && environmentTelemetryModule) {
+        LOG_INFO("Disable EnvironmentTelemetryModule");
+        delete environmentTelemetryModule;
+        environmentTelemetryModule = nullptr;
+        changed = true;
+    }
+    // Sensor discovery normally runs from the boot I2C scan, which a live-created instance (or an
+    // instance created for the screen flag only, before measurement was enabled) has missed. The
+    // scan results are kept alive in i2cScanner, discovery is once-per-boot idempotent, and
+    // i2cScanFinished is public on the ScanI2CConsumer interface.
+    if (environmentTelemetryModule && i2cScanner)
+        static_cast<ScanI2CConsumer *>(environmentTelemetryModule)->i2cScanFinished(i2cScanner.get());
+#if HAS_TELEMETRY && HAS_SENSOR && !MESHTASTIC_EXCLUDE_AIR_QUALITY_SENSOR
+    if (wantAirQualityTelemetryModule() && !airQualityTelemetryModule) {
+        LOG_INFO("Enable AirQualityTelemetryModule");
+        airQualityTelemetryModule = new AirQualityTelemetryModule();
+        changed = true;
+    } else if (!wantAirQualityTelemetryModule() && airQualityTelemetryModule) {
+        LOG_INFO("Disable AirQualityTelemetryModule");
+        delete airQualityTelemetryModule;
+        airQualityTelemetryModule = nullptr;
+        changed = true;
+    }
+    if (airQualityTelemetryModule && i2cScanner)
+        static_cast<ScanI2CConsumer *>(airQualityTelemetryModule)->i2cScanFinished(i2cScanner.get());
+#endif
+#endif
+#if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_POWER_TELEMETRY && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
+    // PowerTelemetry finds its sensors through the global nodeTelemetrySensorsMap, which is
+    // populated at boot and survives, so no discovery re-fire is needed.
+    if (wantPowerTelemetryModule() && !powerTelemetryModule) {
+        LOG_INFO("Enable PowerTelemetryModule");
+        powerTelemetryModule = new PowerTelemetryModule();
+        changed = true;
+    } else if (!wantPowerTelemetryModule() && powerTelemetryModule) {
+        LOG_INFO("Disable PowerTelemetryModule");
+        delete powerTelemetryModule;
+        powerTelemetryModule = nullptr;
+        changed = true;
+    }
+#endif
+
+    if (changed) {
+        LOG_INFO("Module set reconciled with config");
+#if HAS_SCREEN
+        // Module UI frames are collected when frames are (re)built, so refresh after the set changes
+        if (screen)
+            screen->setFrames(graphics::Screen::FOCUS_DEFAULT);
+#endif
+    }
 }

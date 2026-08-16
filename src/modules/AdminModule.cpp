@@ -1,4 +1,5 @@
 #include "AdminModule.h"
+#include "AmbientLightingThread.h"
 #include "Channels.h"
 #include "MeshService.h"
 #include "NodeDB.h"
@@ -7,6 +8,10 @@
 #include "SPILock.h"
 #include "input/InputBroker.h"
 #include "meshUtils.h"
+#include "modules/Modules.h"
+#if !MESHTASTIC_EXCLUDE_EXTERNALNOTIFICATION
+#include "modules/ExternalNotificationModule.h"
+#endif
 #include <FSCommon.h>
 #include <ctype.h> // for better whitespace handling
 #if defined(ARCH_ESP32) && !MESHTASTIC_EXCLUDE_WIFI
@@ -1013,15 +1018,20 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
             return false;
         }
 #endif
-        // enabled gates construction in setupModules(), and the port selection, pins, baud, mode and
-        // timeout are all consumed while SerialModule brings its UART up. echo is checked each time a
-        // packet is sent out, so it is the only field that takes effect live.
-        if (moduleConfig.serial.enabled == c.payload_variant.serial.enabled &&
-            moduleConfig.serial.rxd == c.payload_variant.serial.rxd && moduleConfig.serial.txd == c.payload_variant.serial.txd &&
-            moduleConfig.serial.baud == c.payload_variant.serial.baud &&
-            moduleConfig.serial.mode == c.payload_variant.serial.mode &&
-            moduleConfig.serial.timeout == c.payload_variant.serial.timeout &&
-            moduleConfig.serial.override_console_serial_port == c.payload_variant.serial.override_console_serial_port) {
+        // An enabled change goes through the deferred module reconcile: teardown releases the UART
+        // and a fresh construction brings it up from the new config. The port-shape fields (pins,
+        // baud, mode, timeout, console override) still reboot, but only while the module keeps
+        // running - there is no live rebind path. echo is read per packet.
+        if (moduleConfig.serial.enabled != c.payload_variant.serial.enabled) {
+            requestModuleReconcile();
+            shouldReboot = false;
+        } else if (!moduleConfig.serial.enabled ||
+                   (moduleConfig.serial.rxd == c.payload_variant.serial.rxd &&
+                    moduleConfig.serial.txd == c.payload_variant.serial.txd &&
+                    moduleConfig.serial.baud == c.payload_variant.serial.baud &&
+                    moduleConfig.serial.mode == c.payload_variant.serial.mode &&
+                    moduleConfig.serial.timeout == c.payload_variant.serial.timeout &&
+                    moduleConfig.serial.override_console_serial_port == c.payload_variant.serial.override_console_serial_port)) {
             shouldReboot = false;
         }
         moduleConfig.has_serial = true;
@@ -1029,38 +1039,65 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_external_notification_tag:
         LOG_INFO("Set module config: External Notification");
-        // The module is always constructed, but its setup() only claims the output pins when enabled
-        // was set at boot, and those pinMode() calls capture output/output_vibra/output_buzzer plus
-        // the PWM and I2S buzzer choices. Everything else - the alert_* routing flags, output_ms,
-        // nag_timeout and the active polarity - is consulted when a notification actually fires.
-        if (moduleConfig.external_notification.enabled == c.payload_variant.external_notification.enabled &&
-            moduleConfig.external_notification.output == c.payload_variant.external_notification.output &&
-            moduleConfig.external_notification.output_vibra == c.payload_variant.external_notification.output_vibra &&
-            moduleConfig.external_notification.output_buzzer == c.payload_variant.external_notification.output_buzzer &&
-            moduleConfig.external_notification.use_pwm == c.payload_variant.external_notification.use_pwm &&
-            moduleConfig.external_notification.use_i2s_as_buzzer == c.payload_variant.external_notification.use_i2s_as_buzzer) {
-            shouldReboot = false;
+        // An enabled change is applied by nudging the module directly below - it is always
+        // constructed, so there is no lifecycle to manage, just pins to claim and a thread to wake
+        // (or latched outputs to clear). The output-shape fields still reboot, but only while the
+        // module stays enabled; a same-write enable flip claims the new pins fresh. The alert_*
+        // routing flags, output_ms, nag_timeout and active polarity are read when a notification
+        // fires.
+        {
+            bool extNotifEnabledChanged =
+                moduleConfig.external_notification.enabled != c.payload_variant.external_notification.enabled;
+            if (extNotifEnabledChanged) {
+                shouldReboot = false;
+            } else if (!moduleConfig.external_notification.enabled ||
+                       (moduleConfig.external_notification.output == c.payload_variant.external_notification.output &&
+                        moduleConfig.external_notification.output_vibra == c.payload_variant.external_notification.output_vibra &&
+                        moduleConfig.external_notification.output_buzzer ==
+                            c.payload_variant.external_notification.output_buzzer &&
+                        moduleConfig.external_notification.use_pwm == c.payload_variant.external_notification.use_pwm &&
+                        moduleConfig.external_notification.use_i2s_as_buzzer ==
+                            c.payload_variant.external_notification.use_i2s_as_buzzer)) {
+                shouldReboot = false;
+            }
+            moduleConfig.has_external_notification = true;
+            moduleConfig.external_notification = c.payload_variant.external_notification;
+#if !MESHTASTIC_EXCLUDE_EXTERNALNOTIFICATION
+            if (extNotifEnabledChanged && externalNotificationModule)
+                externalNotificationModule->handleConfigChanged();
+#endif
         }
-        moduleConfig.has_external_notification = true;
-        moduleConfig.external_notification = c.payload_variant.external_notification;
         break;
     case meshtastic_ModuleConfig_store_forward_tag:
         LOG_INFO("Set module config: Store & Forward");
-        // No field here can be applied live: StoreForwardModule's constructor copies records,
-        // history_return_max, history_return_window and heartbeat into its own members (and sizes
-        // its heap allocation from records), so the module never re-reads them. enabled and
-        // is_server additionally gate its construction in setupModules().
+        // An enabled change goes through the deferred module reconcile; a fresh construction reads
+        // the new config, including is_server and the history sizing. Those fields still reboot
+        // while the module keeps running - the constructor copied them into members and sized the
+        // history allocation from records, so they cannot be re-applied in place.
+        if (moduleConfig.store_forward.enabled != c.payload_variant.store_forward.enabled) {
+            requestModuleReconcile();
+            shouldReboot = false;
+        } else if (!moduleConfig.store_forward.enabled ||
+                   (moduleConfig.store_forward.is_server == c.payload_variant.store_forward.is_server &&
+                    moduleConfig.store_forward.records == c.payload_variant.store_forward.records &&
+                    moduleConfig.store_forward.history_return_max == c.payload_variant.store_forward.history_return_max &&
+                    moduleConfig.store_forward.history_return_window == c.payload_variant.store_forward.history_return_window &&
+                    moduleConfig.store_forward.heartbeat == c.payload_variant.store_forward.heartbeat)) {
+            shouldReboot = false;
+        }
         moduleConfig.has_store_forward = true;
         moduleConfig.store_forward = c.payload_variant.store_forward;
         break;
     case meshtastic_ModuleConfig_range_test_tag:
         LOG_INFO("Set module config: Range Test");
-        // enabled gates construction in setupModules(), sender is baked into the thread interval at
-        // startup, and clear_on_reboot is only meaningful across a restart. save is read when a
-        // result is actually written, so it is the one field that applies live.
-        if (moduleConfig.range_test.enabled == c.payload_variant.range_test.enabled &&
-            moduleConfig.range_test.sender == c.payload_variant.range_test.sender &&
-            moduleConfig.range_test.clear_on_reboot == c.payload_variant.range_test.clear_on_reboot) {
+        // An enabled change goes through the deferred module reconcile. sender is baked into the
+        // thread interval at startup, so changing it while the module keeps running still reboots.
+        // clear_on_reboot is only consumed at boot - it means "clear the log at the NEXT restart",
+        // so changing it never justifies forcing one. save is read when a result is written.
+        if (moduleConfig.range_test.enabled != c.payload_variant.range_test.enabled) {
+            requestModuleReconcile();
+            shouldReboot = false;
+        } else if (!moduleConfig.range_test.enabled || moduleConfig.range_test.sender == c.payload_variant.range_test.sender) {
             shouldReboot = false;
         }
         moduleConfig.has_range_test = true;
@@ -1068,24 +1105,33 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_telemetry_tag: {
         LOG_INFO("Set module config: Telemetry");
-        // The *_enabled / *_screen_enabled flags decide in setupModules() whether a telemetry module
-        // is constructed at all, and the modules that are always constructed park themselves for good
-        // when their flags are off (HealthTelemetryModule::runOnce() returns disable()), so a thread
-        // that was switched off cannot notice being switched back on. Those flags still need a reboot.
-        // The intervals and the Fahrenheit display flag are re-read on every run, so they apply live.
+        // Fully live. Environment, air-quality and power flags reconcile module instances (with
+        // sensor discovery re-fired from the retained boot scan results). Health is constructed on
+        // sensor presence rather than config, so a flag enable just wakes its parked thread.
+        // Intervals and the Fahrenheit flag are re-read on every run.
         const auto &t = c.payload_variant.telemetry;
-        if (moduleConfig.telemetry.environment_measurement_enabled == t.environment_measurement_enabled &&
-            moduleConfig.telemetry.environment_screen_enabled == t.environment_screen_enabled &&
-            moduleConfig.telemetry.air_quality_enabled == t.air_quality_enabled &&
-            moduleConfig.telemetry.air_quality_screen_enabled == t.air_quality_screen_enabled &&
-            moduleConfig.telemetry.power_measurement_enabled == t.power_measurement_enabled &&
-            moduleConfig.telemetry.power_screen_enabled == t.power_screen_enabled &&
-            moduleConfig.telemetry.health_measurement_enabled == t.health_measurement_enabled &&
-            moduleConfig.telemetry.health_screen_enabled == t.health_screen_enabled) {
-            shouldReboot = false;
+        if (moduleConfig.telemetry.environment_measurement_enabled != t.environment_measurement_enabled ||
+            moduleConfig.telemetry.environment_screen_enabled != t.environment_screen_enabled ||
+            moduleConfig.telemetry.air_quality_enabled != t.air_quality_enabled ||
+            moduleConfig.telemetry.air_quality_screen_enabled != t.air_quality_screen_enabled ||
+            moduleConfig.telemetry.power_measurement_enabled != t.power_measurement_enabled ||
+            moduleConfig.telemetry.power_screen_enabled != t.power_screen_enabled) {
+            requestModuleReconcile();
         }
-        moduleConfig.has_telemetry = true;
-        moduleConfig.telemetry = t;
+        {
+            bool healthChanged = moduleConfig.telemetry.health_measurement_enabled != t.health_measurement_enabled ||
+                                 moduleConfig.telemetry.health_screen_enabled != t.health_screen_enabled;
+            moduleConfig.has_telemetry = true;
+            moduleConfig.telemetry = t;
+#if HAS_TELEMETRY && HAS_SENSOR && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR && !MESHTASTIC_EXCLUDE_HEALTH_TELEMETRY &&           \
+    !defined(ARCH_PORTDUINO)
+            if (healthChanged && healthTelemetryModule)
+                healthTelemetryModule->handleConfigChanged();
+#else
+            (void)healthChanged;
+#endif
+        }
+        shouldReboot = false;
         break;
     }
     case meshtastic_ModuleConfig_canned_message_tag:
@@ -1131,12 +1177,13 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_neighbor_info_tag:
         LOG_INFO("Set module config: Neighbor Info");
-        // enabled gates the module's construction in setupModules(). update_interval is re-read by
-        // getIntervalMs() on every reschedule and transmit_over_lora at NeighborInfoModule.cpp:127,
-        // so both apply live.
-        if (moduleConfig.neighbor_info.enabled == c.payload_variant.neighbor_info.enabled) {
-            shouldReboot = false;
+        // Fully live. update_interval is re-read by getIntervalMs() on every reschedule and
+        // transmit_over_lora at point of use; an enabled change is handled by the deferred module
+        // reconcile, which constructs or tears down the module instance outside packet dispatch.
+        if (moduleConfig.neighbor_info.enabled != c.payload_variant.neighbor_info.enabled) {
+            requestModuleReconcile();
         }
+        shouldReboot = false;
         moduleConfig.has_neighbor_info = true;
         moduleConfig.neighbor_info = c.payload_variant.neighbor_info;
         if (moduleConfig.neighbor_info.update_interval < min_neighbor_info_broadcast_secs) {
@@ -1146,12 +1193,17 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_detection_sensor_tag:
         LOG_INFO("Set module config: Detection Sensor");
-        // enabled gates construction in setupModules(); monitor_pin and use_pullup are bound by the
-        // pinMode() call in DetectionSensorModule::setup(). The broadcast intervals, trigger type,
-        // name and send_bell are read at point of use each run, so they apply live.
-        if (moduleConfig.detection_sensor.enabled == c.payload_variant.detection_sensor.enabled &&
-            moduleConfig.detection_sensor.monitor_pin == c.payload_variant.detection_sensor.monitor_pin &&
-            moduleConfig.detection_sensor.use_pullup == c.payload_variant.detection_sensor.use_pullup) {
+        // An enabled change goes through the deferred module reconcile: teardown restores the pin
+        // via the module's destructor, and a fresh construction binds whatever pin the new config
+        // names. The one case that still needs a reboot is a pin/pullup change while the module
+        // keeps running - there is no live rebind path. Intervals, trigger type, name and
+        // send_bell are read at point of use each run.
+        if (moduleConfig.detection_sensor.enabled != c.payload_variant.detection_sensor.enabled) {
+            requestModuleReconcile();
+            shouldReboot = false;
+        } else if (!moduleConfig.detection_sensor.enabled ||
+                   (moduleConfig.detection_sensor.monitor_pin == c.payload_variant.detection_sensor.monitor_pin &&
+                    moduleConfig.detection_sensor.use_pullup == c.payload_variant.detection_sensor.use_pullup)) {
             shouldReboot = false;
         }
         moduleConfig.has_detection_sensor = true;
@@ -1159,22 +1211,28 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_ambient_lighting_tag:
         LOG_INFO("Set module config: Ambient Lighting");
-        // Tempting to make live - AmbientLightingThread::runOnce() re-reads all five fields every 30
-        // seconds - but the thread parks itself for good the moment led_state is off (its constructor
-        // and runOnce() both end in disable()), and nothing turns the LED off on the way out. So
-        // switching off would leave it lit and switching back on would never take. Making this live
-        // needs the thread to gain an explicit off path plus a nudge from here, like gps_mode has.
+        // Fully live via a direct nudge: on led_state off the thread turns the LED off before
+        // parking (it used to park without clearing the output), and on led_state on it is woken -
+        // its runOnce() re-reads all five fields and re-applies them. Color/current changes while
+        // running are picked up by the same re-read.
         moduleConfig.has_ambient_lighting = true;
         moduleConfig.ambient_lighting = c.payload_variant.ambient_lighting;
+        shouldReboot = false;
+        if (ambientLightingThread)
+            ambientLightingThread->handleConfigChanged();
         break;
     case meshtastic_ModuleConfig_paxcounter_tag:
         LOG_INFO("Set module config: Paxcounter");
-        // enabled gates construction in setupModules(), and the two RSSI thresholds are copied into
-        // the libpax configuration struct during PaxcounterModule setup. Only the update interval is
-        // re-read on each run, so that is the one field that applies live.
-        if (moduleConfig.paxcounter.enabled == c.payload_variant.paxcounter.enabled &&
-            moduleConfig.paxcounter.wifi_threshold == c.payload_variant.paxcounter.wifi_threshold &&
-            moduleConfig.paxcounter.ble_threshold == c.payload_variant.paxcounter.ble_threshold) {
+        // An enabled change goes through the deferred module reconcile: teardown stops libpax, a
+        // fresh construction re-inits it from the new config. The RSSI thresholds still reboot
+        // while the module keeps running (copied into the libpax config at init); the update
+        // interval is re-read each run.
+        if (moduleConfig.paxcounter.enabled != c.payload_variant.paxcounter.enabled) {
+            requestModuleReconcile();
+            shouldReboot = false;
+        } else if (!moduleConfig.paxcounter.enabled ||
+                   (moduleConfig.paxcounter.wifi_threshold == c.payload_variant.paxcounter.wifi_threshold &&
+                    moduleConfig.paxcounter.ble_threshold == c.payload_variant.paxcounter.ble_threshold)) {
             shouldReboot = false;
         }
         moduleConfig.has_paxcounter = true;
