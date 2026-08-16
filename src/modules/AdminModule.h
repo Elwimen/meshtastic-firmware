@@ -41,7 +41,14 @@ class AdminModule : public ProtobufModule<meshtastic_AdminMessage>, public Obser
     uint8_t session_passkey[8] = {0};
     uint session_time = 0;
 
-    void saveChanges(int saveWhat, bool shouldReboot = true);
+    /**
+     * Record that the current admin write needs a reboot to fully apply, and why. The first
+     * reason wins; reasons accumulate across an open edit transaction and are consumed (logged,
+     * Bluetooth torn down, reboot scheduled) by the saveChanges() that commits.
+     */
+    void requestReboot(const char *reason);
+    void saveChanges(int saveWhat);
+    const char *pendingRebootReason = NULL;
 
     /**
      * Getters

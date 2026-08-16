@@ -91,9 +91,13 @@ void drawFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16
     // Draw the channel name
     display->drawString(x, y + FONT_HEIGHT_SMALL, channelStr);
     // Draw our hardware ID to assist with bluetooth pairing. Either prefix with Info or S&F Logo
-    if (moduleConfig.store_forward.enabled && storeForwardModule) {
+    if (moduleConfig.store_forward.enabled) {
 #ifdef ARCH_ESP32
-        if (!Throttle::isWithinTimespanMs(storeForwardModule->lastHeartbeat,
+        // Null-check as well: with live module lifecycle there is a window where the flag is on
+        // but the deferred reconcile has not constructed the instance yet. The extern is only
+        // declared for ESP32, so the check lives inside the arch guard.
+        if (storeForwardModule &&
+            !Throttle::isWithinTimespanMs(storeForwardModule->lastHeartbeat,
                                           (storeForwardModule->heartbeatInterval * 1200))) { // no heartbeat, overlap a bit
 #if (defined(USE_EINK) || defined(ILI9341_DRIVER) || defined(ILI9342_DRIVER) || defined(ST7701_CS) || defined(ST7735_CS) ||      \
      defined(ST7789_CS) || defined(USE_ST7789) || defined(ILI9488_CS) || defined(HX8357_CS) || defined(ST7796_CS) ||             \

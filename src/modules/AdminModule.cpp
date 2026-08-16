@@ -364,7 +364,9 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         break;
     }
     case meshtastic_AdminMessage_commit_edit_settings_tag: {
-        disableBluetooth();
+        // Bluetooth is torn down by saveChanges() only when the accumulated writes actually need a
+        // reboot - unconditionally killing it here would leave ESP32 BLE dead after a live-only
+        // transaction, since the stack cannot restart without a reset.
         LOG_INFO("Commit transaction for edited settings");
         hasOpenEditTransaction = false;
         saveChanges(SEGMENT_CONFIG | SEGMENT_MODULECONFIG | SEGMENT_DEVICESTATE | SEGMENT_CHANNELS | SEGMENT_NODEDATABASE);
@@ -398,7 +400,7 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         meshtastic_NodeInfoLite *node = nodeDB->getMeshNode(r->set_favorite_node);
         if (node != NULL) {
             node->is_favorite = true;
-            saveChanges(SEGMENT_NODEDATABASE, false);
+            saveChanges(SEGMENT_NODEDATABASE);
             if (screen)
                 screen->setFrames(graphics::Screen::FOCUS_PRESERVE); // <-- Rebuild screens
         }
@@ -409,7 +411,7 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         meshtastic_NodeInfoLite *node = nodeDB->getMeshNode(r->remove_favorite_node);
         if (node != NULL) {
             node->is_favorite = false;
-            saveChanges(SEGMENT_NODEDATABASE, false);
+            saveChanges(SEGMENT_NODEDATABASE);
             if (screen)
                 screen->setFrames(graphics::Screen::FOCUS_PRESERVE); // <-- Rebuild screens
         }
@@ -424,7 +426,7 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
             node->has_position = false;
             node->user.public_key.size = 0;
             memset(node->user.public_key.bytes, 0, sizeof(node->user.public_key.bytes));
-            saveChanges(SEGMENT_NODEDATABASE, false);
+            saveChanges(SEGMENT_NODEDATABASE);
         }
         break;
     }
@@ -433,7 +435,7 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         meshtastic_NodeInfoLite *node = nodeDB->getMeshNode(r->remove_ignored_node);
         if (node != NULL) {
             node->is_ignored = false;
-            saveChanges(SEGMENT_NODEDATABASE, false);
+            saveChanges(SEGMENT_NODEDATABASE);
         }
         break;
     }
@@ -442,7 +444,7 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         meshtastic_NodeInfoLite *node = nodeDB->getMeshNode(r->toggle_muted_node);
         if (node != NULL) {
             node->bitfield ^= (1 << NODEINFO_BITFIELD_IS_MUTED_SHIFT);
-            saveChanges(SEGMENT_NODEDATABASE, false);
+            saveChanges(SEGMENT_NODEDATABASE);
         }
         break;
     }
@@ -454,7 +456,7 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         node->position = TypeConversions::ConvertToPositionLite(r->set_fixed_position);
         nodeDB->setLocalPosition(r->set_fixed_position);
         config.position.fixed_position = true;
-        saveChanges(SEGMENT_NODEDATABASE | SEGMENT_CONFIG, false);
+        saveChanges(SEGMENT_NODEDATABASE | SEGMENT_CONFIG);
 #if !MESHTASTIC_EXCLUDE_GPS
         if (gps != nullptr)
             gps->enable();
@@ -467,7 +469,7 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         LOG_INFO("Client received remove_fixed_position command");
         nodeDB->clearLocalPosition();
         config.position.fixed_position = false;
-        saveChanges(SEGMENT_NODEDATABASE | SEGMENT_CONFIG, false);
+        saveChanges(SEGMENT_NODEDATABASE | SEGMENT_CONFIG);
         break;
     }
     case meshtastic_AdminMessage_set_time_only_tag: {
@@ -657,6 +659,7 @@ void AdminModule::handleSetOwner(const meshtastic_User &o)
 
     if (changed) { // If nothing really changed, don't broadcast on the network or write to flash
         service->reloadOwner(!hasOpenEditTransaction);
+        requestReboot("owner changed (BLE name and node identity fields are derived at boot)");
         saveChanges(SEGMENT_DEVICESTATE | SEGMENT_NODEDATABASE);
     }
 }
@@ -666,7 +669,6 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
     auto changes = SEGMENT_CONFIG;
     auto existingRole = config.device.role;
     bool isRegionUnset = (config.lora.region == meshtastic_Config_LoRaConfig_RegionCode_UNSET);
-    bool requiresReboot = true;
 
     switch (c.which_payload_variant) {
     case meshtastic_Config_device_tag:
@@ -681,15 +683,11 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
             accelerometerThread->start();
         }
 #endif
-        // Only fields captured at boot force a reboot. button_gpio is bound by pinMode()/interrupt
-        // registration in InputBroker, and role decides which PowerFSM transitions get installed.
-        // buzzer_gpio (buzz.cpp, ExternalNotificationModule) and rebroadcast_mode (FloodingRouter,
-        // NextHopRouter, Router, RoutingModule) are read at point of use on every call, so they
-        // take effect live.
-        if (config.device.button_gpio == c.payload_variant.device.button_gpio &&
-            config.device.role == c.payload_variant.device.role) {
-            requiresReboot = false;
-        }
+        // buzzer_gpio and rebroadcast_mode are read at point of use on every call and apply live.
+        if (config.device.button_gpio != c.payload_variant.device.button_gpio)
+            requestReboot("device.button_gpio is bound by pinMode/interrupt registration at boot");
+        if (config.device.role != c.payload_variant.device.role)
+            requestReboot("device.role decides PowerFSM transitions and the module set at boot");
         config.device = c.payload_variant.device;
         if (config.device.rebroadcast_mode == meshtastic_Config_DeviceConfig_RebroadcastMode_NONE &&
             (config.device.role == meshtastic_Config_DeviceConfig_Role_ROUTER ||
@@ -715,7 +713,7 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
             if (moduleConfig.store_forward.enabled && !moduleConfig.store_forward.is_server) {
                 moduleConfig.store_forward.is_server = true;
                 changes |= SEGMENT_MODULECONFIG;
-                requiresReboot = true;
+                requestReboot("store_forward.is_server forced on for a deprecated role");
             }
         }
 #if USERPREFS_EVENT_MODE
@@ -736,10 +734,10 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
         // section - broadcast intervals, gps_update_interval, gps_mode, fixed_position, flags - is
         // read at point of use by GPS, GPSUpdateScheduling and PositionModule, so it applies live.
         // gps_mode in particular is already toggled at runtime from the on-device menu.
-        if (config.position.rx_gpio == c.payload_variant.position.rx_gpio &&
-            config.position.tx_gpio == c.payload_variant.position.tx_gpio &&
-            config.position.gps_en_gpio == c.payload_variant.position.gps_en_gpio) {
-            requiresReboot = false;
+        if (config.position.rx_gpio != c.payload_variant.position.rx_gpio ||
+            config.position.tx_gpio != c.payload_variant.position.tx_gpio ||
+            config.position.gps_en_gpio != c.payload_variant.position.gps_en_gpio) {
+            requestReboot("GPS pins are bound in GPS::setup() at boot");
         }
 #if !MESHTASTIC_EXCLUDE_GPS
         // NOT_PRESENT is the one gps_mode transition that cannot be done live: main.cpp skips
@@ -747,7 +745,7 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
         // object to hand the new mode to. Leaving NOT_PRESENT still needs a reboot to build one.
         if (gps == nullptr && config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT &&
             c.payload_variant.position.gps_mode != meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT) {
-            requiresReboot = true;
+            requestReboot("GPS was not created at boot (gps_mode was NOT_PRESENT)");
         }
 #endif
         // If we have turned off the GPS (disabled or not present) and we're not using fixed position,
@@ -756,7 +754,7 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
             c.payload_variant.position.gps_mode != meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
             config.position.fixed_position == false && c.payload_variant.position.fixed_position == false) {
             nodeDB->clearLocalPosition();
-            saveChanges(SEGMENT_NODEDATABASE | SEGMENT_CONFIG, false);
+            saveChanges(SEGMENT_NODEDATABASE | SEGMENT_CONFIG);
         }
         config.position = c.payload_variant.position;
 #if !MESHTASTIC_EXCLUDE_GPS
@@ -784,10 +782,10 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
         // ls_secs, sds_secs and on_battery_shutdown_after_secs are read at point of use (PowerFSM
         // lsEnter/sdsEnter, PowerFSMThread). min_wake_secs and wait_bluetooth_secs are baked into
         // timed-transition intervals, but PowerFSM_updateTimeouts() rewrites those in place below.
-        if (config.power.device_battery_ina_address == c.payload_variant.power.device_battery_ina_address &&
-            config.power.is_power_saving == c.payload_variant.power.is_power_saving) {
-            requiresReboot = false;
-        }
+        if (config.power.device_battery_ina_address != c.payload_variant.power.device_battery_ina_address)
+            requestReboot("power INA battery monitor is probed once at boot");
+        if (config.power.is_power_saving != c.payload_variant.power.is_power_saving)
+            requestReboot("power.is_power_saving decides which PowerFSM transitions exist");
         config.power = c.payload_variant.power;
         if (c.payload_variant.power.on_battery_shutdown_after_secs > 0 &&
             c.payload_variant.power.on_battery_shutdown_after_secs < 30) {
@@ -800,6 +798,8 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
         LOG_INFO("Set config: WiFi");
         config.has_network = true;
         config.network = c.payload_variant.network;
+        // initWifi()/mDNS/NTP/syslog all start once at boot behind APStartupComplete.
+        requestReboot("network services start once at boot");
         break;
     case meshtastic_Config_display_tag:
         LOG_INFO("Set config: Display");
@@ -808,13 +808,14 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
         // rewritten in place - see PowerFSM_updateTimeouts() below - so it no longer forces a reboot.
         // flip_screen is applied once while the display driver is brought up, oled selects the driver
         // itself, and displaymode decides which UI modules get constructed, so those still do.
-        if (config.display.flip_screen == c.payload_variant.display.flip_screen &&
-            config.display.oled == c.payload_variant.display.oled &&
-            config.display.displaymode == c.payload_variant.display.displaymode) {
-            requiresReboot = false;
-        } else if (config.display.displaymode != meshtastic_Config_DisplayConfig_DisplayMode_COLOR &&
-                   c.payload_variant.display.displaymode == meshtastic_Config_DisplayConfig_DisplayMode_COLOR) {
-            config.bluetooth.enabled = false;
+        if (config.display.flip_screen != c.payload_variant.display.flip_screen ||
+            config.display.oled != c.payload_variant.display.oled ||
+            config.display.displaymode != c.payload_variant.display.displaymode) {
+            requestReboot("display driver orientation/type/mode are applied while the driver is brought up");
+            if (config.display.displaymode != meshtastic_Config_DisplayConfig_DisplayMode_COLOR &&
+                c.payload_variant.display.displaymode == meshtastic_Config_DisplayConfig_DisplayMode_COLOR) {
+                config.bluetooth.enabled = false;
+            }
         }
 #if !defined(ARCH_PORTDUINO) && !defined(ARCH_STM32WL) && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR &&                            \
     !MESHTASTIC_EXCLUDE_ACCELEROMETER
@@ -851,14 +852,6 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
         // observer, and RadioInterface::reconfigure() puts the radio in standby, reprograms all
         // modem parameters and restarts receive. Region changes are handled further down and go
         // through initRegion() on the same path, so none of this needs a reboot.
-        requiresReboot = false;
-
-#if defined(ARCH_PORTDUINO)
-        // If running on portduino and using SimRadio, do not require reboot
-        if (SimRadio::instance) {
-            requiresReboot = false;
-        }
-#endif
 
 #ifdef RF95_FAN_EN
         // Turn PA off if disabled by config
@@ -931,6 +924,9 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
         LOG_INFO("Set config: Bluetooth");
         config.has_bluetooth = true;
         config.bluetooth = c.payload_variant.bluetooth;
+        // ESP32 releases the BLE controller's RAM to the heap on shutdown; there is no way back
+        // without a reset, so this section can never apply live.
+        requestReboot("bluetooth stack cannot be reconfigured or restarted without a reset");
         break;
     case meshtastic_Config_security_tag: {
         LOG_INFO("Set config: Security");
@@ -970,9 +966,9 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
         // is consulted at point of use and applies live.
         // NB: the check this replaces compared config.security against the incoming payload *after*
         // the assignment above, so it was always true - security config never rebooted at all.
-        requiresReboot =
-            config.security.public_key.size != oldSecurity.public_key.size ||
-            memcmp(config.security.public_key.bytes, oldSecurity.public_key.bytes, config.security.public_key.size) != 0;
+        if (config.security.public_key.size != oldSecurity.public_key.size ||
+            memcmp(config.security.public_key.bytes, oldSecurity.public_key.bytes, config.security.public_key.size) != 0)
+            requestReboot("node identity changed: my_node_num derives from the public key");
 
         break;
     }
@@ -980,17 +976,11 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
         // NOOP! This is handled by handleStoreDeviceUIConfig
         break;
     }
-    if (requiresReboot && !hasOpenEditTransaction) {
-        disableBluetooth();
-    }
-
-    saveChanges(changes, requiresReboot);
+    saveChanges(changes);
 }
 
 bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
 {
-    bool shouldReboot = true;
-
     switch (c.which_payload_variant) {
     case meshtastic_ModuleConfig_mqtt_tag:
 #if MESHTASTIC_EXCLUDE_MQTT
@@ -998,6 +988,7 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         return false;
 #else
         LOG_INFO("Set module config: MQTT");
+        requestReboot("mqtt client connects once at startup; no reconnect path yet");
         if (!MQTT::isValidConfig(c.payload_variant.mqtt)) {
             return false;
         }
@@ -1024,15 +1015,14 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         // running - there is no live rebind path. echo is read per packet.
         if (moduleConfig.serial.enabled != c.payload_variant.serial.enabled) {
             requestModuleReconcile();
-            shouldReboot = false;
-        } else if (!moduleConfig.serial.enabled ||
-                   (moduleConfig.serial.rxd == c.payload_variant.serial.rxd &&
-                    moduleConfig.serial.txd == c.payload_variant.serial.txd &&
-                    moduleConfig.serial.baud == c.payload_variant.serial.baud &&
-                    moduleConfig.serial.mode == c.payload_variant.serial.mode &&
-                    moduleConfig.serial.timeout == c.payload_variant.serial.timeout &&
-                    moduleConfig.serial.override_console_serial_port == c.payload_variant.serial.override_console_serial_port)) {
-            shouldReboot = false;
+        } else if (moduleConfig.serial.enabled &&
+                   !(moduleConfig.serial.rxd == c.payload_variant.serial.rxd &&
+                     moduleConfig.serial.txd == c.payload_variant.serial.txd &&
+                     moduleConfig.serial.baud == c.payload_variant.serial.baud &&
+                     moduleConfig.serial.mode == c.payload_variant.serial.mode &&
+                     moduleConfig.serial.timeout == c.payload_variant.serial.timeout &&
+                     moduleConfig.serial.override_console_serial_port == c.payload_variant.serial.override_console_serial_port)) {
+            requestReboot("serial port shape changed while the module is running");
         }
         moduleConfig.has_serial = true;
         moduleConfig.serial = c.payload_variant.serial;
@@ -1048,17 +1038,14 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         {
             bool extNotifEnabledChanged =
                 moduleConfig.external_notification.enabled != c.payload_variant.external_notification.enabled;
-            if (extNotifEnabledChanged) {
-                shouldReboot = false;
-            } else if (!moduleConfig.external_notification.enabled ||
-                       (moduleConfig.external_notification.output == c.payload_variant.external_notification.output &&
-                        moduleConfig.external_notification.output_vibra == c.payload_variant.external_notification.output_vibra &&
-                        moduleConfig.external_notification.output_buzzer ==
-                            c.payload_variant.external_notification.output_buzzer &&
-                        moduleConfig.external_notification.use_pwm == c.payload_variant.external_notification.use_pwm &&
-                        moduleConfig.external_notification.use_i2s_as_buzzer ==
-                            c.payload_variant.external_notification.use_i2s_as_buzzer)) {
-                shouldReboot = false;
+            if (!extNotifEnabledChanged && moduleConfig.external_notification.enabled &&
+                !(moduleConfig.external_notification.output == c.payload_variant.external_notification.output &&
+                  moduleConfig.external_notification.output_vibra == c.payload_variant.external_notification.output_vibra &&
+                  moduleConfig.external_notification.output_buzzer == c.payload_variant.external_notification.output_buzzer &&
+                  moduleConfig.external_notification.use_pwm == c.payload_variant.external_notification.use_pwm &&
+                  moduleConfig.external_notification.use_i2s_as_buzzer ==
+                      c.payload_variant.external_notification.use_i2s_as_buzzer)) {
+                requestReboot("external notification output pins changed while the module is running");
             }
             moduleConfig.has_external_notification = true;
             moduleConfig.external_notification = c.payload_variant.external_notification;
@@ -1076,14 +1063,13 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         // history allocation from records, so they cannot be re-applied in place.
         if (moduleConfig.store_forward.enabled != c.payload_variant.store_forward.enabled) {
             requestModuleReconcile();
-            shouldReboot = false;
-        } else if (!moduleConfig.store_forward.enabled ||
-                   (moduleConfig.store_forward.is_server == c.payload_variant.store_forward.is_server &&
-                    moduleConfig.store_forward.records == c.payload_variant.store_forward.records &&
-                    moduleConfig.store_forward.history_return_max == c.payload_variant.store_forward.history_return_max &&
-                    moduleConfig.store_forward.history_return_window == c.payload_variant.store_forward.history_return_window &&
-                    moduleConfig.store_forward.heartbeat == c.payload_variant.store_forward.heartbeat)) {
-            shouldReboot = false;
+        } else if (moduleConfig.store_forward.enabled &&
+                   !(moduleConfig.store_forward.is_server == c.payload_variant.store_forward.is_server &&
+                     moduleConfig.store_forward.records == c.payload_variant.store_forward.records &&
+                     moduleConfig.store_forward.history_return_max == c.payload_variant.store_forward.history_return_max &&
+                     moduleConfig.store_forward.history_return_window == c.payload_variant.store_forward.history_return_window &&
+                     moduleConfig.store_forward.heartbeat == c.payload_variant.store_forward.heartbeat)) {
+            requestReboot("store&forward history sizing/role changed while the module is running");
         }
         moduleConfig.has_store_forward = true;
         moduleConfig.store_forward = c.payload_variant.store_forward;
@@ -1096,9 +1082,8 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         // so changing it never justifies forcing one. save is read when a result is written.
         if (moduleConfig.range_test.enabled != c.payload_variant.range_test.enabled) {
             requestModuleReconcile();
-            shouldReboot = false;
-        } else if (!moduleConfig.range_test.enabled || moduleConfig.range_test.sender == c.payload_variant.range_test.sender) {
-            shouldReboot = false;
+        } else if (moduleConfig.range_test.enabled && moduleConfig.range_test.sender != c.payload_variant.range_test.sender) {
+            requestReboot("range test sender interval is baked into the thread at startup");
         }
         moduleConfig.has_range_test = true;
         moduleConfig.range_test = c.payload_variant.range_test;
@@ -1131,7 +1116,6 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
             (void)healthChanged;
 #endif
         }
-        shouldReboot = false;
         break;
     }
     case meshtastic_ModuleConfig_canned_message_tag:
@@ -1139,23 +1123,24 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         // The rotary/up-down input pins and their event codes are consumed when RotaryEncoderImpl
         // and friends are constructed - the pins are latched and interrupts attached there - so
         // changing them needs a restart. send_bell is read each time a message is composed or sent.
-        if (moduleConfig.canned_message.rotary1_enabled == c.payload_variant.canned_message.rotary1_enabled &&
-            moduleConfig.canned_message.updown1_enabled == c.payload_variant.canned_message.updown1_enabled &&
-            moduleConfig.canned_message.inputbroker_pin_a == c.payload_variant.canned_message.inputbroker_pin_a &&
-            moduleConfig.canned_message.inputbroker_pin_b == c.payload_variant.canned_message.inputbroker_pin_b &&
-            moduleConfig.canned_message.inputbroker_pin_press == c.payload_variant.canned_message.inputbroker_pin_press &&
-            moduleConfig.canned_message.inputbroker_event_cw == c.payload_variant.canned_message.inputbroker_event_cw &&
-            moduleConfig.canned_message.inputbroker_event_ccw == c.payload_variant.canned_message.inputbroker_event_ccw &&
-            moduleConfig.canned_message.inputbroker_event_press == c.payload_variant.canned_message.inputbroker_event_press &&
-            moduleConfig.canned_message.enabled == c.payload_variant.canned_message.enabled &&
-            strcmp(moduleConfig.canned_message.allow_input_source, c.payload_variant.canned_message.allow_input_source) == 0) {
-            shouldReboot = false;
+        if (!(moduleConfig.canned_message.rotary1_enabled == c.payload_variant.canned_message.rotary1_enabled &&
+              moduleConfig.canned_message.updown1_enabled == c.payload_variant.canned_message.updown1_enabled &&
+              moduleConfig.canned_message.inputbroker_pin_a == c.payload_variant.canned_message.inputbroker_pin_a &&
+              moduleConfig.canned_message.inputbroker_pin_b == c.payload_variant.canned_message.inputbroker_pin_b &&
+              moduleConfig.canned_message.inputbroker_pin_press == c.payload_variant.canned_message.inputbroker_pin_press &&
+              moduleConfig.canned_message.inputbroker_event_cw == c.payload_variant.canned_message.inputbroker_event_cw &&
+              moduleConfig.canned_message.inputbroker_event_ccw == c.payload_variant.canned_message.inputbroker_event_ccw &&
+              moduleConfig.canned_message.inputbroker_event_press == c.payload_variant.canned_message.inputbroker_event_press &&
+              moduleConfig.canned_message.enabled == c.payload_variant.canned_message.enabled &&
+              strcmp(moduleConfig.canned_message.allow_input_source, c.payload_variant.canned_message.allow_input_source) == 0)) {
+            requestReboot("canned-message input pins are bound and interrupts attached at boot");
         }
         moduleConfig.has_canned_message = true;
         moduleConfig.canned_message = c.payload_variant.canned_message;
         break;
     case meshtastic_ModuleConfig_audio_tag:
         LOG_INFO("Set module config: Audio");
+        requestReboot("audio I2S pins and codec are claimed at driver setup");
         // Nothing here applies live: the I2S pins and PTT are claimed when AudioModule sets up its
         // driver, and the codec2 bitrate is fixed at the same point.
         moduleConfig.has_audio = true;
@@ -1167,10 +1152,10 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         // into an availablePins bitmask it uses for every later access check. enabled is tested in
         // handleReceivedProtobuf() and allow_undefined_pin_access inside pinAccessAllowed(), both
         // per request, so those two apply live.
-        if (moduleConfig.remote_hardware.available_pins_count == c.payload_variant.remote_hardware.available_pins_count &&
-            memcmp(moduleConfig.remote_hardware.available_pins, c.payload_variant.remote_hardware.available_pins,
-                   sizeof(moduleConfig.remote_hardware.available_pins)) == 0) {
-            shouldReboot = false;
+        if (!(moduleConfig.remote_hardware.available_pins_count == c.payload_variant.remote_hardware.available_pins_count &&
+              memcmp(moduleConfig.remote_hardware.available_pins, c.payload_variant.remote_hardware.available_pins,
+                     sizeof(moduleConfig.remote_hardware.available_pins)) == 0)) {
+            requestReboot("remote hardware pin allowlist is folded into a bitmask at boot");
         }
         moduleConfig.has_remote_hardware = true;
         moduleConfig.remote_hardware = c.payload_variant.remote_hardware;
@@ -1183,7 +1168,6 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         if (moduleConfig.neighbor_info.enabled != c.payload_variant.neighbor_info.enabled) {
             requestModuleReconcile();
         }
-        shouldReboot = false;
         moduleConfig.has_neighbor_info = true;
         moduleConfig.neighbor_info = c.payload_variant.neighbor_info;
         if (moduleConfig.neighbor_info.update_interval < min_neighbor_info_broadcast_secs) {
@@ -1200,11 +1184,10 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         // send_bell are read at point of use each run.
         if (moduleConfig.detection_sensor.enabled != c.payload_variant.detection_sensor.enabled) {
             requestModuleReconcile();
-            shouldReboot = false;
-        } else if (!moduleConfig.detection_sensor.enabled ||
-                   (moduleConfig.detection_sensor.monitor_pin == c.payload_variant.detection_sensor.monitor_pin &&
-                    moduleConfig.detection_sensor.use_pullup == c.payload_variant.detection_sensor.use_pullup)) {
-            shouldReboot = false;
+        } else if (moduleConfig.detection_sensor.enabled &&
+                   !(moduleConfig.detection_sensor.monitor_pin == c.payload_variant.detection_sensor.monitor_pin &&
+                     moduleConfig.detection_sensor.use_pullup == c.payload_variant.detection_sensor.use_pullup)) {
+            requestReboot("detection sensor pin changed while the module is running");
         }
         moduleConfig.has_detection_sensor = true;
         moduleConfig.detection_sensor = c.payload_variant.detection_sensor;
@@ -1217,7 +1200,6 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         // running are picked up by the same re-read.
         moduleConfig.has_ambient_lighting = true;
         moduleConfig.ambient_lighting = c.payload_variant.ambient_lighting;
-        shouldReboot = false;
         if (ambientLightingThread)
             ambientLightingThread->handleConfigChanged();
         break;
@@ -1229,11 +1211,10 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         // interval is re-read each run.
         if (moduleConfig.paxcounter.enabled != c.payload_variant.paxcounter.enabled) {
             requestModuleReconcile();
-            shouldReboot = false;
-        } else if (!moduleConfig.paxcounter.enabled ||
-                   (moduleConfig.paxcounter.wifi_threshold == c.payload_variant.paxcounter.wifi_threshold &&
-                    moduleConfig.paxcounter.ble_threshold == c.payload_variant.paxcounter.ble_threshold)) {
-            shouldReboot = false;
+        } else if (moduleConfig.paxcounter.enabled &&
+                   !(moduleConfig.paxcounter.wifi_threshold == c.payload_variant.paxcounter.wifi_threshold &&
+                     moduleConfig.paxcounter.ble_threshold == c.payload_variant.paxcounter.ble_threshold)) {
+            requestReboot("paxcounter RSSI thresholds changed while the module is running");
         }
         moduleConfig.has_paxcounter = true;
         moduleConfig.paxcounter = c.payload_variant.paxcounter;
@@ -1242,18 +1223,9 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         LOG_INFO("Set module config: StatusMessage");
         moduleConfig.has_statusmessage = true;
         moduleConfig.statusmessage = c.payload_variant.statusmessage;
-        shouldReboot = false;
         break;
     }
-    // Only tear Bluetooth down when a reboot is actually coming: on ESP32 the BLE stack cannot be
-    // brought back without one, because disableBluetooth() releases the controller's RAM to the
-    // general heap. Gating on shouldReboot rather than a hand-maintained list of exempt sections
-    // means a section that opts out of rebooting can no longer leave the radio dead until the user
-    // power-cycles the node. This mirrors what handleSetConfig() already does with requiresReboot.
-    if (shouldReboot && !hasOpenEditTransaction) {
-        disableBluetooth();
-    }
-    saveChanges(SEGMENT_MODULECONFIG, shouldReboot);
+    saveChanges(SEGMENT_MODULECONFIG);
     return true;
 }
 
@@ -1264,7 +1236,7 @@ void AdminModule::handleSetChannel(const meshtastic_Channel &cc)
         sendWarning(licensedModeMessage);
     }
     channels.onConfigChanged(); // tell the radios about this change
-    saveChanges(SEGMENT_CHANNELS, false);
+    saveChanges(SEGMENT_CHANNELS);
 }
 
 /**
@@ -1599,7 +1571,15 @@ void AdminModule::reboot(int32_t seconds)
     rebootAtMsec = (seconds < 0) ? 0 : (millis() + seconds * 1000);
 }
 
-void AdminModule::saveChanges(int saveWhat, bool shouldReboot)
+void AdminModule::requestReboot(const char *reason)
+{
+    // First reason wins for the log line; reasons accumulate across an open edit transaction and
+    // are consumed by the saveChanges() that commits it.
+    if (!pendingRebootReason)
+        pendingRebootReason = reason;
+}
+
+void AdminModule::saveChanges(int saveWhat)
 {
     if (!hasOpenEditTransaction) {
         LOG_INFO("Save changes to disk");
@@ -1607,8 +1587,11 @@ void AdminModule::saveChanges(int saveWhat, bool shouldReboot)
     } else {
         LOG_INFO("Delay save of changes to disk until the open transaction is committed");
     }
-    if (shouldReboot && !hasOpenEditTransaction) {
+    if (pendingRebootReason && !hasOpenEditTransaction) {
+        LOG_INFO("Config change requires reboot: %s", pendingRebootReason);
+        disableBluetooth();
         reboot(DEFAULT_REBOOT_SECONDS);
+        pendingRebootReason = NULL;
     }
 }
 
@@ -1664,6 +1647,7 @@ void AdminModule::handleSetHamMode(const meshtastic_HamParameters &p)
     channels.onConfigChanged();
 
     service->reloadOwner(false);
+    requestReboot("ham mode reconfigures identity and channels");
     saveChanges(SEGMENT_CONFIG | SEGMENT_NODEDATABASE | SEGMENT_DEVICESTATE | SEGMENT_CHANNELS);
 }
 
