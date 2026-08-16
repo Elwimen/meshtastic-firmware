@@ -44,6 +44,22 @@ class AmbientLightingThread : public concurrency::OSThread
 #endif
 
   public:
+    /**
+     * Apply a live ambient_lighting config change: wakes the parked thread on led_state on (the
+     * next runOnce() re-reads all five fields and re-applies them), and on led_state off turns
+     * the LED off explicitly - the thread otherwise parks without ever clearing the output.
+     */
+    void handleConfigChanged()
+    {
+        if (moduleConfig.ambient_lighting.led_state) {
+            enabled = true;
+            setIntervalFromNow(0);
+        } else {
+            setLightingOff(nullptr);
+            disable();
+        }
+    }
+
     explicit AmbientLightingThread(ScanI2C::DeviceType type) : OSThread("AmbientLighting")
     {
         notifyDeepSleepObserver.observe(&notifyDeepSleep); // Let us know when shutdown() is issued.
@@ -218,4 +234,6 @@ class AmbientLightingThread : public concurrency::OSThread
 #endif
         }
     };
+    extern AmbientLightingThread *ambientLightingThread;
+
 #endif // AMBIENTLIGHTINGTHREAD_H

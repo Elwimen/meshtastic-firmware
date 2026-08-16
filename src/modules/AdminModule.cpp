@@ -1,4 +1,5 @@
 #include "AdminModule.h"
+#include "AmbientLightingThread.h"
 #include "Channels.h"
 #include "MeshService.h"
 #include "NodeDB.h"
@@ -1203,13 +1204,15 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_ambient_lighting_tag:
         LOG_INFO("Set module config: Ambient Lighting");
-        // Tempting to make live - AmbientLightingThread::runOnce() re-reads all five fields every 30
-        // seconds - but the thread parks itself for good the moment led_state is off (its constructor
-        // and runOnce() both end in disable()), and nothing turns the LED off on the way out. So
-        // switching off would leave it lit and switching back on would never take. Making this live
-        // needs the thread to gain an explicit off path plus a nudge from here, like gps_mode has.
+        // Fully live via a direct nudge: on led_state off the thread turns the LED off before
+        // parking (it used to park without clearing the output), and on led_state on it is woken -
+        // its runOnce() re-reads all five fields and re-applies them. Color/current changes while
+        // running are picked up by the same re-read.
         moduleConfig.has_ambient_lighting = true;
         moduleConfig.ambient_lighting = c.payload_variant.ambient_lighting;
+        shouldReboot = false;
+        if (ambientLightingThread)
+            ambientLightingThread->handleConfigChanged();
         break;
     case meshtastic_ModuleConfig_paxcounter_tag:
         LOG_INFO("Set module config: Paxcounter");

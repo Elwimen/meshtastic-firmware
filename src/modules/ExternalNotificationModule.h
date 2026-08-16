@@ -7,7 +7,6 @@
 
 #ifdef HAS_RGB_LED
 #include "AmbientLightingThread.h"
-extern AmbientLightingThread *ambientLightingThread;
 #endif
 
 // Drive a single WS2812 as the notification LED (M1/M2-style LED_NOTIFICATION
