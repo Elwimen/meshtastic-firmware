@@ -130,6 +130,15 @@ static bool wantRangeTestModule()
 }
 #endif
 
+#if (defined(ARCH_ESP32) || defined(ARCH_NRF52) || defined(ARCH_RP2040) || defined(ARCH_STM32WL)) &&                             \
+    !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3) && !MESHTASTIC_EXCLUDE_SERIAL
+static bool wantSerialModule()
+{
+    return moduleConfig.has_serial && moduleConfig.serial.enabled &&
+           config.display.displaymode != meshtastic_Config_DisplayConfig_DisplayMode_COLOR;
+}
+#endif
+
 void setupModules()
 {
 #if (HAS_BUTTON || ARCH_PORTDUINO) && !MESHTASTIC_EXCLUDE_INPUTBROKER
@@ -238,9 +247,8 @@ void setupModules()
 #if (defined(ARCH_ESP32) || defined(ARCH_NRF52) || defined(ARCH_RP2040) || defined(ARCH_STM32WL)) &&                             \
     !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3)
 #if !MESHTASTIC_EXCLUDE_SERIAL
-    if (moduleConfig.has_serial && moduleConfig.serial.enabled &&
-        config.display.displaymode != meshtastic_Config_DisplayConfig_DisplayMode_COLOR) {
-        new SerialModule();
+    if (wantSerialModule()) {
+        serialModule = new SerialModule();
     }
 #endif
 #endif
@@ -296,6 +304,22 @@ void reconcileModules()
     bool changed = false;
 
     // One block per convertible module, added as each is taught to tear down cleanly.
+
+#if (defined(ARCH_ESP32) || defined(ARCH_NRF52) || defined(ARCH_RP2040) || defined(ARCH_STM32WL)) &&                             \
+    !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3) && !MESHTASTIC_EXCLUDE_SERIAL
+    // The destructor also removes the lazily-created radio companion, releases a dedicated UART
+    // if one was claimed, and restores the serialPrint target. Nothing else references the global.
+    if (wantSerialModule() && !serialModule) {
+        LOG_INFO("Enable SerialModule");
+        serialModule = new SerialModule();
+        changed = true;
+    } else if (!wantSerialModule() && serialModule) {
+        LOG_INFO("Disable SerialModule");
+        delete serialModule;
+        serialModule = nullptr;
+        changed = true;
+    }
+#endif
 
 #if !MESHTASTIC_EXCLUDE_RANGETEST && !MESHTASTIC_EXCLUDE_GPS
     // The thread's destructor also removes the lazily-created radio companion. Nothing else

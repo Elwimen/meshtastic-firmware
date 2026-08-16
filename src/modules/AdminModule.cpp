@@ -1014,15 +1014,20 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
             return false;
         }
 #endif
-        // enabled gates construction in setupModules(), and the port selection, pins, baud, mode and
-        // timeout are all consumed while SerialModule brings its UART up. echo is checked each time a
-        // packet is sent out, so it is the only field that takes effect live.
-        if (moduleConfig.serial.enabled == c.payload_variant.serial.enabled &&
-            moduleConfig.serial.rxd == c.payload_variant.serial.rxd && moduleConfig.serial.txd == c.payload_variant.serial.txd &&
-            moduleConfig.serial.baud == c.payload_variant.serial.baud &&
-            moduleConfig.serial.mode == c.payload_variant.serial.mode &&
-            moduleConfig.serial.timeout == c.payload_variant.serial.timeout &&
-            moduleConfig.serial.override_console_serial_port == c.payload_variant.serial.override_console_serial_port) {
+        // An enabled change goes through the deferred module reconcile: teardown releases the UART
+        // and a fresh construction brings it up from the new config. The port-shape fields (pins,
+        // baud, mode, timeout, console override) still reboot, but only while the module keeps
+        // running - there is no live rebind path. echo is read per packet.
+        if (moduleConfig.serial.enabled != c.payload_variant.serial.enabled) {
+            requestModuleReconcile();
+            shouldReboot = false;
+        } else if (!moduleConfig.serial.enabled ||
+                   (moduleConfig.serial.rxd == c.payload_variant.serial.rxd &&
+                    moduleConfig.serial.txd == c.payload_variant.serial.txd &&
+                    moduleConfig.serial.baud == c.payload_variant.serial.baud &&
+                    moduleConfig.serial.mode == c.payload_variant.serial.mode &&
+                    moduleConfig.serial.timeout == c.payload_variant.serial.timeout &&
+                    moduleConfig.serial.override_console_serial_port == c.payload_variant.serial.override_console_serial_port)) {
             shouldReboot = false;
         }
         moduleConfig.has_serial = true;
