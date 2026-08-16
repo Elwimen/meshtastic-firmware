@@ -143,6 +143,13 @@ static bool wantSerialModule()
 }
 #endif
 
+#if (defined(ARCH_ESP32) || defined(ARCH_PORTDUINO)) && !MESHTASTIC_EXCLUDE_STOREFORWARD
+static bool wantStoreForwardModule()
+{
+    return moduleConfig.has_store_forward && moduleConfig.store_forward.enabled;
+}
+#endif
+
 #if HAS_TELEMETRY && HAS_SENSOR && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
 static bool wantEnvironmentTelemetryModule()
 {
@@ -288,7 +295,7 @@ void setupModules()
 #endif
 #if defined(ARCH_ESP32) || defined(ARCH_PORTDUINO)
 #if !MESHTASTIC_EXCLUDE_STOREFORWARD
-    if (moduleConfig.has_store_forward && moduleConfig.store_forward.enabled) {
+    if (wantStoreForwardModule()) {
         storeForwardModule = new StoreForwardModule();
     }
 #endif
@@ -386,6 +393,21 @@ void reconcileModules()
         LOG_INFO("Disable NeighborInfoModule");
         delete neighborInfoModule;
         neighborInfoModule = nullptr;
+        changed = true;
+    }
+#endif
+
+#if (defined(ARCH_ESP32) || defined(ARCH_PORTDUINO)) && !MESHTASTIC_EXCLUDE_STOREFORWARD
+    // The PSRAM history is a smart pointer and frees on destruction. The two call sites that used
+    // to dereference the global guarded only by the config flag now null-check it as well.
+    if (wantStoreForwardModule() && !storeForwardModule) {
+        LOG_INFO("Enable StoreForwardModule");
+        storeForwardModule = new StoreForwardModule();
+        changed = true;
+    } else if (!wantStoreForwardModule() && storeForwardModule) {
+        LOG_INFO("Disable StoreForwardModule");
+        delete storeForwardModule;
+        storeForwardModule = nullptr;
         changed = true;
     }
 #endif

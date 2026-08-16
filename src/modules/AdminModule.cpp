@@ -1069,10 +1069,21 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_store_forward_tag:
         LOG_INFO("Set module config: Store & Forward");
-        // No field here can be applied live: StoreForwardModule's constructor copies records,
-        // history_return_max, history_return_window and heartbeat into its own members (and sizes
-        // its heap allocation from records), so the module never re-reads them. enabled and
-        // is_server additionally gate its construction in setupModules().
+        // An enabled change goes through the deferred module reconcile; a fresh construction reads
+        // the new config, including is_server and the history sizing. Those fields still reboot
+        // while the module keeps running - the constructor copied them into members and sized the
+        // history allocation from records, so they cannot be re-applied in place.
+        if (moduleConfig.store_forward.enabled != c.payload_variant.store_forward.enabled) {
+            requestModuleReconcile();
+            shouldReboot = false;
+        } else if (!moduleConfig.store_forward.enabled ||
+                   (moduleConfig.store_forward.is_server == c.payload_variant.store_forward.is_server &&
+                    moduleConfig.store_forward.records == c.payload_variant.store_forward.records &&
+                    moduleConfig.store_forward.history_return_max == c.payload_variant.store_forward.history_return_max &&
+                    moduleConfig.store_forward.history_return_window == c.payload_variant.store_forward.history_return_window &&
+                    moduleConfig.store_forward.heartbeat == c.payload_variant.store_forward.heartbeat)) {
+            shouldReboot = false;
+        }
         moduleConfig.has_store_forward = true;
         moduleConfig.store_forward = c.payload_variant.store_forward;
         break;
