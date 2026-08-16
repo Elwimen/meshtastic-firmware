@@ -1181,6 +1181,11 @@ void loop()
 #endif
 
     service->loop();
+
+    // Safe point for module lifecycle changes: packet dispatch (callModules) has fully unwound,
+    // so modules requested on/off by an admin config write can be constructed/destroyed here.
+    reconcileModules();
+
 #if !MESHTASTIC_EXCLUDE_INPUTBROKER && defined(HAS_FREE_RTOS) && !defined(ARCH_RP2040)
     if (inputBroker)
         inputBroker->processInputEventQueue();

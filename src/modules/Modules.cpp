@@ -253,3 +253,37 @@ void setupModules()
     // acks
     routingModule = new RoutingModule();
 }
+
+// Set by requestModuleReconcile(), consumed by reconcileModules(). Both run on the main loop
+// (AdminModule handles packets from service->loop(), reconcileModules() is called right after
+// it), so plain bool is enough - no ISR or second core touches this.
+static bool moduleReconcilePending = false;
+
+void requestModuleReconcile()
+{
+    moduleReconcilePending = true;
+}
+
+void reconcileModules()
+{
+    if (!moduleReconcilePending)
+        return;
+    moduleReconcilePending = false;
+
+    bool changed = false;
+
+    // One block per convertible module, added as each is taught to tear down cleanly.
+    // Pattern:
+    //   bool want = <same condition setupModules() uses>;
+    //   if (want && !fooModule) { fooModule = new FooModule(); changed = true; }
+    //   if (!want && fooModule) { delete fooModule; fooModule = nullptr; changed = true; }
+
+    if (changed) {
+        LOG_INFO("Module set reconciled with config");
+#if HAS_SCREEN
+        // Module UI frames are collected when frames are (re)built, so refresh after the set changes
+        if (screen)
+            screen->setFrames(graphics::Screen::FOCUS_DEFAULT);
+#endif
+    }
+}
