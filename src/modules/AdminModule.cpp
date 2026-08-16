@@ -1056,12 +1056,14 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_range_test_tag:
         LOG_INFO("Set module config: Range Test");
-        // enabled gates construction in setupModules(), sender is baked into the thread interval at
-        // startup, and clear_on_reboot is only meaningful across a restart. save is read when a
-        // result is actually written, so it is the one field that applies live.
-        if (moduleConfig.range_test.enabled == c.payload_variant.range_test.enabled &&
-            moduleConfig.range_test.sender == c.payload_variant.range_test.sender &&
-            moduleConfig.range_test.clear_on_reboot == c.payload_variant.range_test.clear_on_reboot) {
+        // An enabled change goes through the deferred module reconcile. sender is baked into the
+        // thread interval at startup, so changing it while the module keeps running still reboots.
+        // clear_on_reboot is only consumed at boot - it means "clear the log at the NEXT restart",
+        // so changing it never justifies forcing one. save is read when a result is written.
+        if (moduleConfig.range_test.enabled != c.payload_variant.range_test.enabled) {
+            requestModuleReconcile();
+            shouldReboot = false;
+        } else if (!moduleConfig.range_test.enabled || moduleConfig.range_test.sender == c.payload_variant.range_test.sender) {
             shouldReboot = false;
         }
         moduleConfig.has_range_test = true;

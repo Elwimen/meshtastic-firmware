@@ -14,6 +14,12 @@ class RangeTestModule : private concurrency::OSThread
   public:
     RangeTestModule();
 
+    /**
+     * Also tears down the RangeTestModuleRadio companion this thread creates lazily on first
+     * run, so a live disable removes both halves of the module.
+     */
+    ~RangeTestModule();
+
   protected:
     virtual int32_t runOnce() override;
 };

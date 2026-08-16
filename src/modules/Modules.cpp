@@ -123,6 +123,13 @@ static bool wantDetectionSensorModule()
 }
 #endif
 
+#if !MESHTASTIC_EXCLUDE_RANGETEST && !MESHTASTIC_EXCLUDE_GPS
+static bool wantRangeTestModule()
+{
+    return moduleConfig.has_range_test && moduleConfig.range_test.enabled;
+}
+#endif
+
 void setupModules()
 {
 #if (HAS_BUTTON || ARCH_PORTDUINO) && !MESHTASTIC_EXCLUDE_INPUTBROKER
@@ -259,8 +266,8 @@ void setupModules()
     externalNotificationModule = new ExternalNotificationModule();
 #endif
 #if !MESHTASTIC_EXCLUDE_RANGETEST && !MESHTASTIC_EXCLUDE_GPS
-    if (moduleConfig.has_range_test && moduleConfig.range_test.enabled)
-        new RangeTestModule();
+    if (wantRangeTestModule())
+        rangeTestModule = new RangeTestModule();
 #endif
 #if defined(HAS_HARDWARE_WATCHDOG)
     watchdogThread = new WatchdogThread();
@@ -289,6 +296,21 @@ void reconcileModules()
     bool changed = false;
 
     // One block per convertible module, added as each is taught to tear down cleanly.
+
+#if !MESHTASTIC_EXCLUDE_RANGETEST && !MESHTASTIC_EXCLUDE_GPS
+    // The thread's destructor also removes the lazily-created radio companion. Nothing else
+    // references either global.
+    if (wantRangeTestModule() && !rangeTestModule) {
+        LOG_INFO("Enable RangeTestModule");
+        rangeTestModule = new RangeTestModule();
+        changed = true;
+    } else if (!wantRangeTestModule() && rangeTestModule) {
+        LOG_INFO("Disable RangeTestModule");
+        delete rangeTestModule;
+        rangeTestModule = nullptr;
+        changed = true;
+    }
+#endif
 
 #if !MESHTASTIC_EXCLUDE_DETECTIONSENSOR
     // Hardware is handled by the module's destructor (drops the pullup on the pin it bound,
